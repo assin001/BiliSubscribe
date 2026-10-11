@@ -37,13 +37,13 @@ from gsuid_core.logger import logger
 from gsuid_core.models import Event, Message
 from gsuid_core.segment import MessageSegment
 
+from ..bili import fulltext
+from ..bili.api import api
+from ..bili.dynamic import is_animated_url, normalize_image_url
+from ..core import config as cfg
+from ..core import runtime
+from ..core import storage
 from . import card as card_render
-from . import config as cfg
-from . import fulltext
-from . import runtime
-from . import storage
-from .bili_api import api
-from .dynamic_parser import is_animated_url, normalize_image_url
 
 MAX_TEXT = 150
 # 其余图片（合并转发）的"少发一点"规则：动图最多几张、单张动图最大多少，

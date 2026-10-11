@@ -39,14 +39,14 @@ from gsuid_core.logger import logger
 from gsuid_core.models import Event, Message
 from gsuid_core.segment import MessageSegment
 
-from . import config as cfg
-from .bili_api import _UA, api
-from .push import reply, send_to_target
+from ..core import config as cfg
+from ..render.push import reply, send_to_target
+from .api import _UA, api
 
 GENERATE_URL = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
 POLL_URL = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll"
 
-# 登录态 Cookie 就这几个（buvid 指纹由 bili_api 自己补，不用存）
+# 登录态 Cookie 就这几个（buvid 指纹由 bili/api.py 自己补，不用存）
 COOKIE_KEYS = ("SESSDATA", "bili_jct", "DedeUserID", "DedeUserID__ckMd5")
 
 QR_TTL = 180          # 二维码有效期（秒）

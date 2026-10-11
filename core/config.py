@@ -31,6 +31,8 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from ..paths import LOCAL_DATA_DIR
+
 
 def _data_dir() -> Path:
     """插件数据目录：优先用 GsCore 规范的 ``get_res_path``（<repo>/data/BiliSubscribe）。"""
@@ -45,7 +47,7 @@ def _data_dir() -> Path:
 
         return Path(gsuid_core.__file__).resolve().parents[1] / "data" / "BiliSubscribe"
     except Exception:
-        return Path(__file__).parent / "data"
+        return LOCAL_DATA_DIR
 
 
 DATA_DIR = _data_dir()

@@ -36,10 +36,10 @@ from typing import Dict, List, Optional, Tuple
 
 from gsuid_core.logger import logger
 
+from ..render.push import build_dynamic_msgs, format_dynamic, push_to_groups, send_to_target
 from . import config as cfg
 from . import storage
 from .config import DATA_DIR
-from .push import build_dynamic_msgs, format_dynamic, push_to_groups, send_to_target
 
 PENDING_PATH = DATA_DIR / "pending.json"
 LEGACY_PATH = DATA_DIR / "review.json"  # 老版本的文件名，加载时顺手搬过来

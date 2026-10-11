@@ -53,23 +53,24 @@ from gsuid_core.models import Event
 from gsuid_core.segment import MessageSegment
 from gsuid_core.sv import SV
 
-from . import adfilter
-from . import bili_login
-from . import config as cfg
-from . import fulltext
-from . import games
-from . import pending
-from . import runtime
-from . import status_card
-from . import storage
-from .bili_api import api
-from .dynamic_parser import (
+from .bili import fulltext
+from .bili import login as bili_login
+from .bili.api import api
+from .bili.dynamic import (
     extract_dynamic,
     is_animated_url,
     latest_id,
     select_new_dynamics,
 )
-from .push import (
+from .core import adfilter
+from .core import config as cfg
+from .core import games
+from .core import pending
+from .core import runtime
+from .core import storage
+from .paths import HELP_ADMIN_IMAGE, HELP_IMAGE
+from .render import status_card
+from .render.push import (
     build_dynamic_msgs,
     build_live_msgs,
     build_video_msgs,
@@ -146,9 +147,7 @@ bili待定 记录                     最近的拍板记录
 也可以直接在 Web 控制台的「插件 → BiliSubscribe → 配置」里改，改完立即生效
 """
 
-# 帮助图（跟着插件目录走，重装/挪目录都不用改路径）
-HELP_IMAGE = Path(__file__).parent / "bilihelp.jpg"          # 群聊命令
-HELP_ADMIN_IMAGE = Path(__file__).parent / "biliadminhelp.jpg"  # 管理员命令
+# 帮助图路径集中在 paths.py（跟着插件目录走，重装/挪目录都不用改路径）
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +271,7 @@ def _storage_text() -> str:
     """
     if str(getattr(storage, "BACKEND", "")) != "database":
         return "本地 JSON（data/BiliSubscribe/subscribe.json）"
-    from . import models
+    from .core import models
 
     if getattr(models, "ADMIN_REGISTERED", False):
         return "GsCore 数据库，表 BiliSubscribeSub 已挂到控制台「数据库管理」"

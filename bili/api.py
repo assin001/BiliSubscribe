@@ -38,7 +38,7 @@ import aiohttp
 
 from gsuid_core.logger import logger
 
-from . import config as cfg
+from ..core import config as cfg
 from .wbi import encode_wbi
 
 # 图片磁盘缓存：头像这种每次都一样的图，同一个 URL 只下载一次
@@ -232,7 +232,7 @@ class BiliApi:
     def _cache_file(url: str):
         """这个 URL 对应的缓存文件（拿不到缓存目录就返回 None，等于不缓存）。"""
         try:
-            from .config import IMAGE_CACHE_DIR
+            from ..core.config import IMAGE_CACHE_DIR
 
             return IMAGE_CACHE_DIR / (hashlib.sha1(url.encode("utf-8")).hexdigest()[:24] + ".img")
         except Exception:
@@ -245,7 +245,7 @@ class BiliApi:
             return
         _cache_checked = True
         try:
-            from .config import IMAGE_CACHE_DIR
+            from ..core.config import IMAGE_CACHE_DIR
 
             if not IMAGE_CACHE_DIR.is_dir():
                 return

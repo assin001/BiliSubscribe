@@ -54,9 +54,9 @@ from gsuid_core.logger import logger
 from gsuid_core.models import Message
 from gsuid_core.segment import MessageSegment
 
-from . import config as cfg
-from .bili_api import api
-from .dynamic_parser import extract_dynamic, normalize_image_url
+from ..core import config as cfg
+from .api import api
+from .dynamic import extract_dynamic, normalize_image_url
 
 # 一条合并转发里最多放几张图
 MAX_FORWARD_IMAGES = 6

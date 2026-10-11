@@ -30,12 +30,12 @@
 不往仓库里塞二进制文件。
 """
 import time
-from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from . import config as cfg
-from . import runtime
-from . import storage
+from ..core import config as cfg
+from ..core import runtime
+from ..core import storage
+from ..paths import PLUGIN_ROOT
 
 
 def _log(msg: str, level: str = "warning") -> None:
@@ -83,7 +83,7 @@ def get_icon():
     大小写都试一遍：Windows 上不区分，Linux（GsCore 的实际部署环境）区分，
     用户丢进来叫 ``icon.png`` 的话大写法是找不到的。
     """
-    here = Path(__file__).resolve().parent
+    here = PLUGIN_ROOT
     for name in ("ICON.png", "icon.png", "ICON.PNG"):
         path = here / name
         if not path.is_file():
@@ -159,7 +159,7 @@ async def run_state() -> str:
 
 async def pending_count() -> int:
     """待定队列里的动态条数（只有开了「未命中进待定队列」才会有）。"""
-    from . import pending
+    from ..core import pending
 
     return await pending.count()
 

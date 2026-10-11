@@ -46,6 +46,8 @@ from typing import Dict, List, Optional, Tuple
 
 from gsuid_core.logger import logger
 
+from ..paths import PLUGIN_ROOT
+
 # ---------------------------------------------------------------- 尺寸（模板 ×1.5）
 CARD_W = 900
 PAD = 30  # 模板 content padding 20px
@@ -103,8 +105,9 @@ LH_DESC = 38  # 1.6
 LH_FOOT = 30
 
 # ---------------------------------------------------------------- 字体
-_PLUGIN_DIR = Path(__file__).resolve().parent
-# 想换字体：把 .ttf/.ttc/.otf 丢进插件目录（BiliSubscribe/）即可，文件名带关键字就认
+# 字体按**插件根目录**递归找：放在 fonts/（或根下任意子目录）都认
+_PLUGIN_DIR = PLUGIN_ROOT
+# 想换字体：把 .ttf/.ttc/.otf 丢进 fonts/ 即可，文件名带关键字就认
 _ROLE_KEYS: Dict[str, Tuple[str, ...]] = {
     # 关键词顺序 = 优先级
     "header": ("youshebiaotihei", "youshebiaoti", "优设"),
@@ -155,7 +158,7 @@ _font_cache: Dict[str, Optional[str]] = {}
 
 
 def _local_fonts() -> List[str]:
-    """插件目录里自己带的字体，**含子目录**（比如 ``fonts/``、现在的 ``fnots/``）。
+    """插件目录里自己带的字体，**含子目录**（就是 ``fonts/``）。
 
     PIL 只吃 ttf/ttc/otf，woff2 不认（那要先转格式）。
     """
