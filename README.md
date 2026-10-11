@@ -33,6 +33,7 @@
 ## 丨我该如何安装该插件？
 
 - 前提：你已经部署好 [gsuid_core](https://github.com/Genshin-bots/gsuid_core)。
+- 国内镜像地址：https://cnb.cool/as-sin/BiliSubscribe
 - 将本仓库克隆到 GsCore 插件目录并重启：
 
 ```bash
