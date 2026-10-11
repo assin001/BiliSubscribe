@@ -1,0 +1,12 @@
+[project]
+name = "BiliSubscribe"
+version = "0.1.0"
+description = "B站订阅：订阅 UP 主的视频与动态更新，推送到群聊"
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.9"
+dependencies = [
+    "aiohttp>=3.8.0",
+    # 扫码登录要渲染二维码；核心通常已经带了，缺了也能跑（会退回发登录链接）
+    "qrcode>=7.4",
+]

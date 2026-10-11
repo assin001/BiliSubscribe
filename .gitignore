@@ -1,0 +1,52 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ===== 虚拟环境 =====
+.venv/
+venv/
+env/
+ENV/
+
+# ===== 缓存 / 测试产物 =====
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# ===== 插件运行时数据（订阅表 / Cookie / 配置 / 图片缓存）=====
+# config.py 的 DATA_DIR、storage.py 的 subscribe.json 都落在这里
+data/
+/data/
+*.json.tmp
+*.db
+*.sqlite
+*.sqlite3
+
+# ===== 日志与临时文件 =====
+*.log
+*.tmp
+
+# ===== 本地敏感信息（真实 Cookie / 密钥，不要提交）=====
+.env
+.env.*
+
+# ===== IDE / 编辑器 =====
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ===== 操作系统 =====
+.DS_Store
+Thumbs.db
+desktop.ini
