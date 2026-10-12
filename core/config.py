@@ -29,9 +29,9 @@ Web 控制台的「插件 → BiliSubscribe → 配置」页就能直接读写�
 """
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from ..paths import LOCAL_DATA_DIR
+from ..paths import GAME_RULES_DIR, LOCAL_DATA_DIR
 
 
 def _data_dir() -> Path:
@@ -109,6 +109,38 @@ def _warn(msg: str) -> None:
         pass
 
 
+def _default_game_rules_enabled() -> List[str]:
+    """「启用的游戏规则」的默认值 = ``game_rules/`` 里现有的全部规则名。
+
+    只在**第一次**生成配置时算一次（之后以配置里存的为准），所以装好就是"全都启用、
+    全都显示"，去掉哪个就在控制台把哪一项删掉。
+
+    规则文件里写了 ``"enabled": false`` 的算"出厂默认不启用"，不进这个默认值；
+    运行时不再看文件里那个字段（启停只看配置项）。
+    """
+    names: List[str] = []
+    try:
+        for path in sorted(GAME_RULES_DIR.glob("*.json")):
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                raw = None
+            if isinstance(raw, dict):
+                flag = raw.get("enabled", True)
+                if flag is False:
+                    continue
+                if isinstance(flag, str) and _is_false_text(flag):
+                    continue
+            names.append(path.stem)
+    except Exception:
+        pass
+    return names
+
+
+def _is_false_text(text: str) -> bool:
+    return text.strip().lower() in ("0", "false", "off", "no", "关", "否", "禁用", "关闭")
+
+
 # ---------------------------------------------------------------------------
 # 默认值（扁平）：兜底后端与「合法键名集合」都以它为准
 # ---------------------------------------------------------------------------
@@ -145,9 +177,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "full_text_limit": 5000,
     # 多图动态：预览放 3 张，其余图放进合并转发
     "push_extra_images": True,
-    # 动态过滤（白名单）：哪些 UP 要走白名单由内置游戏规则决定（见 games.py），
-    # 这里是管理员额外加的关键词：标题/正文命中就当命中白名单，直接推
+    # 动态过滤（游戏规则）：哪些 UP 要走规则由 game_rules/ 里的外挂 JSON 决定（见 games.py），
+    # 这里是管理员额外加的关键词：标题/正文命中就放行，直接推
     "auto_push_keywords": [],
+    # 启用的游戏规则：规则名（JSON 文件名，不含 .json）**在列表里才生效**。
+    # 默认值 = game_rules/ 里现有的全部规则名（见 _default_game_rules_enabled），
+    # 所以装好就是"全都启用"；想去掉哪个就在控制台把那一项删掉
+    "game_rules_enabled": _default_game_rules_enabled(),
     # 没命中白名单的动态要不要进待定队列（默认直接过滤掉，不推也不打扰人）
     "queue_unmatched": False,
     # 待定队列的通知发到哪些会话，格式 "group:群号" 或 "qq:direct:QQ号"
@@ -293,11 +329,26 @@ def _build_gsc_default() -> Optional[Dict[str, Any]]:
             "关掉就只发卡片",
             True,
         ),
-        "divider_review": GsDivider("动态过滤（白名单）", "官方号只有命中白名单才推群，其余过滤"),
+        "divider_review": GsDivider(
+            "动态过滤（游戏规则）",
+            f"官方号按自己的规则过滤，规则目录：{GAME_RULES_DIR}"
+            "（一个游戏一个 JSON，文件名就是规则名）。每套规则自己选口径："
+            "whitelist = 命中放行栏目才推、其余过滤；blacklist = 默认全推、只丢命中的屏蔽词。"
+            "规则内容也可以在「数据库管理 → 游戏过滤规则」里直接看和改（改完自动写回 JSON）。"
+            "新增/删除规则请加/删 JSON 文件；改完不用重启。当前规则用 bili过滤规则 查看",
+        ),
+        "game_rules_enabled": GsListStrConfig(
+            "启用的游戏规则",
+            "默认把 game_rules/ 里现有的规则**全部**列在这里 = 全部启用。"
+            "要去掉哪个就把哪一项删掉（删掉 = 停用，该官方号不再走规则过滤，和普通 UP 一样照单全推）；"
+            "删光了就是全部停用。想加回来就填规则名（JSON 文件名，不含 .json）",
+            _default_game_rules_enabled(),
+        ),
         "auto_push_keywords": GsListStrConfig(
-            "额外白名单关键词",
-            "除了内置游戏规则里各自的白名单栏目，再额外放行一批关键词"
-            "（标题或正文命中就直接推，如：情报回顾）。留空不影响内置规则",
+            "额外放行关键词",
+            "除了各游戏规则里自己的放行栏目，再额外放行一批关键词"
+            "（标题或正文命中就直接推，如：情报回顾）。对所有规则生效（含黑名单口径），"
+            "但挡不住游戏规则里的屏蔽词。留空不影响游戏规则",
             [],
         ),
         "queue_unmatched": GsBoolConfig(

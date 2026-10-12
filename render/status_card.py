@@ -165,7 +165,7 @@ async def pending_count() -> int:
 
 
 async def filtered_count() -> int:
-    """本次启动以来被白名单过滤掉的动态条数。"""
+    """本次启动以来被规则挡下的动态条数（命中屏蔽词 + 白名单口径没命中）。"""
     return int(runtime.STATE.get("filtered") or 0)
 
 

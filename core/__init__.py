@@ -1,5 +1,5 @@
 # BiliSubscribe - 订阅 B站 UP 主的视频与动态更新，推送到群聊
-# Copyright (C) 2026  Dowond (bilibili-Subscribe)
+# Copyright (C) 2026  Dowond (bilibili-subscribe)
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -16,6 +16,12 @@
 
 """业务内核：配置、订阅数据、运行时状态与动态过滤规则。
 
-注意：``models.py`` 会被 ``storage.py`` 在导入时连带导入 —— 数据库模型与控制台
-管理页的注册（``@site.register_admin``）依赖这个时机，别改成惰性导入。
+注意两处**依赖导入时机**的地方，别改成惰性导入：
+
+- ``models.py`` 会被 ``storage.py`` 在导入时连带导入；
+- ``game_rules_db.py`` 由本文件导入。
+
+两者都在模块顶层注册控制台的「数据库管理」页（``@site.register_admin``，
+它靠调用栈认插件目录），import 晚了就赶不上核心启动时的建表与菜单拉取。
 """
+from . import game_rules_db  # noqa: F401  （导入即注册，见上面的说明）

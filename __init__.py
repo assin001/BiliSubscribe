@@ -30,9 +30,10 @@
 - ``bili帮助`` 优先发插件目录里的 ``bilihelp.jpg``，``bili管理帮助`` 发
   ``biliadminhelp.jpg``（图不在就各自退回文字帮助）；管理帮助挂 pm=1，
   普通成员发不会回。
-- 官方号（异环这类）走**动态过滤/白名单**（见 ``games.py``）：订阅了就按该游戏的
-  白名单栏目过滤——命中才推群，其余（推广、联动、抽奖）过滤掉，视频不受影响；
-  想把没命中的捞回来可以开「未命中的动态进待定队列」。
+- 官方号（异环、卡拉彼丘这类）走**动态过滤**（见 ``core/games.py``）：规则是插件目录
+  ``game_rules/`` 里的**外挂 JSON**（一个游戏一个文件），每套规则自己选口径 ——
+  ``whitelist``（命中栏目才推，其余过滤）或 ``blacklist``（默认全推，只丢命中的屏蔽词）；
+  订阅了就自动套用，视频不受影响。
 - 推送画成**卡片图**（见 ``card.py``）：头部 + 标题 + 正文 + 首图；链接单独一条；
   其余图片**一律按原链接原样发**（同一条消息里，平台自己排版）——不拼图、不转码，
   动了图才还是动的；长文默认只发卡片预览，要看全文点链接
@@ -64,6 +65,7 @@ from .bili.dynamic import (
 )
 from .core import adfilter
 from .core import config as cfg
+from .core import game_rules_db
 from .core import games
 from .core import pending
 from .core import runtime
@@ -128,10 +130,12 @@ bili检查更新                      立刻跑一轮更新检查
 bili推这条 <链接|ID|cv号|BV号|短链> [订阅群] 手动补推一条动态或视频（默认推到本会话）
 bili测试全文 <动态链接|ID|cv号|短链>   调试：看长文正文能抓到多少
 
-动态过滤（白名单）：官方号只有命中白名单栏目才推群，其余过滤
-bili过滤规则（bili游戏）          查看内置白名单：哪些游戏、哪些栏目
+动态过滤（游戏规则）：每套规则自己选口径——白名单=命中栏目才推、黑名单=默认全推只挡屏蔽词
+bili过滤规则（bili游戏）          查看游戏规则：口径、栏目、规则文件在哪
+bili游戏规则 [停用|启用 <规则名>] 停用 / 启用一套规则（bili游戏规则 重载 重新读文件）
 bili过滤测试 <链接|ID>            给一条动态，看它会不会被推（只判断不发送）
-bili白名单 <关键词|取消 关键词>   额外白名单关键词：命中就直接推
+bili白名单 <关键词|取消 关键词>   额外放行关键词：命中就直接推（对所有规则生效）
+（规则是插件目录 game_rules/ 里的 JSON，一个游戏一个文件；删掉即停用）
 待定队列（默认关，开了才有人工这一步）：
 bili待定                          看待定列表
 可以推送 <编号|全部>              推送到订阅群      bili跳过 <编号|全部>  过滤掉
@@ -328,11 +332,13 @@ async def _config_text() -> str:
             "（只对非官方号，改单条用 bili设置）",
             f"订阅数据：{_storage_text()}",
             _storage_counts(stat),
-            f"\n内置白名单游戏：{'、'.join(games.GAMES) or '（无）'}"
-            f" / 额外白名单关键词：{len(cfg.get_list('auto_push_keywords'))} 个"
-            f"\n动态过滤：没命中白名单的{'进待定队列' if conf.get('queue_unmatched') else '直接过滤'}"
+            f"\n游戏规则：{games.status_line()}"
+            f"（外挂 JSON：{games.rules_dir()}）"
+            f" / 额外放行关键词：{len(cfg.get_list('auto_push_keywords'))} 个"
+            f"\n白名单口径的「其余」动态"
+            f"{'进待定队列' if conf.get('queue_unmatched') else '直接过滤'}"
             f" / 待定通知会话：{len(cfg.get_list('review_targets'))} 处"
-            "\n（哪些 UP 走白名单由内置游戏规则决定，见 bili过滤规则）",
+            "\n（哪些 UP 走哪套规则由 game_rules/*.json 决定，见 bili过滤规则）",
             f"配置来源：{cfg.config_source()}",
             "修改：bili修改配置 <项> <值>",
         ]
@@ -786,10 +792,11 @@ async def _cmd_check_now(bot: Bot, ev: Event):
 # 命令：动态过滤（官方号白名单）与待定队列
 # ---------------------------------------------------------------------------
 def _decide_how(preset: Optional[games.GamePreset], kind: str, parsed: Dict) -> str:
-    """这条动态怎么处理：视频永远直接推，其它交给所在游戏的白名单规则判断。
+    """这条动态怎么处理：视频永远直接推，其它交给所在游戏的规则判断。
 
-    游戏白名单写在 ``games.py``（每个游戏一套：官方号 + 白名单栏目 + 可选定制逻辑），
-    所以**订阅了官方号就自动按该游戏的口径过滤**，不需要管理员手动维护名单。
+    规则是**外挂 JSON**（插件目录的 ``game_rules/``，每个游戏一个文件：官方号 +
+    口径 + 放行栏目 + 屏蔽关键词），所以**订阅了官方号就自动按该游戏的口径过滤**，
+    不需要管理员手动维护名单。
     """
     if kind == "video" or preset is None:
         return games.PUSH
@@ -856,7 +863,7 @@ def _pending_hint() -> str:
             "想把它们捞回来看看：把「未命中的动态进待定队列」打开"
             "（bili修改配置 待定 开，或到 Web 控制台），再说一次「bili待定 在这里」指定通知会话"
         )
-    return "当前没有待定的动态\n（白名单栏目见 bili过滤规则）"
+    return "当前没有待定的动态\n（游戏规则见 bili过滤规则）"
 
 
 @sv_bili_admin.on_command(("bili待定", "bili审核", "bili待审核"), block=True)
@@ -970,7 +977,7 @@ async def _cmd_skip_seq(bot: Bot, ev: Event):
 
 @sv_bili_admin.on_command(("bili白名单",), block=True)
 async def _cmd_whitelist(bot: Bot, ev: Event):
-    """额外白名单关键词：命中就直接推（在游戏内置的白名单栏目之外再补一层）。"""
+    """额外放行关键词：命中就直接推（在游戏规则自己的栏目之外再补一层）。"""
     arg = _args(ev).strip()
     keywords = cfg.get_list("auto_push_keywords")
     if not arg:
@@ -978,9 +985,10 @@ async def _cmd_whitelist(bot: Bot, ev: Event):
         await reply(
             bot,
             ev,
-            f"额外白名单关键词：\n{body}\n\n"
+            f"额外放行关键词：\n{body}\n\n"
             "添加：bili白名单 <关键词>    移除：bili白名单 取消 <关键词>\n"
-            "标题或正文命中就直接推送；各游戏内置的白名单栏目见 bili过滤规则",
+            "标题或正文命中就直接推送（对所有规则生效，含黑名单口径；"
+            "但挡不住游戏规则里的屏蔽词）；各游戏的栏目见 bili过滤规则",
         )
         return
 
@@ -997,9 +1005,9 @@ async def _cmd_whitelist(bot: Bot, ev: Event):
         if keyword in keywords:
             keywords.remove(keyword)
             cfg.set_value("auto_push_keywords", keywords)
-            await reply(bot, ev, f"已移除白名单关键词「{keyword}」")
+            await reply(bot, ev, f"已移除放行关键词「{keyword}」")
         else:
-            await reply(bot, ev, f"「{keyword}」本来就不在白名单里")
+            await reply(bot, ev, f"「{keyword}」本来就不在放行关键词里")
         return
 
     if keyword in keywords:
@@ -1007,15 +1015,16 @@ async def _cmd_whitelist(bot: Bot, ev: Event):
         return
     keywords.append(keyword)
     cfg.set_value("auto_push_keywords", keywords)
-    await reply(bot, ev, f"已添加白名单关键词「{keyword}」：命中它的动态会直接推送")
+    await reply(bot, ev, f"已添加放行关键词「{keyword}」：命中它的动态会直接推送")
 
 
 @sv_bili_admin.on_command(("bili过滤测试", "bili过滤查询"), block=True)
 async def _cmd_filter_check(bot: Bot, ev: Event):
     """过滤自检：给一条动态，告诉你它会不会被推（**不发送、不动游标**）。
 
-    排查"这条明明该推怎么没推"用的：会打出标题/正文、命中哪个白名单栏目、
-    以及最终判定。判定为"过滤"就说明要加栏目名（``games.py`` 或 ``bili白名单``）。
+    排查"这条明明该推怎么没推"用的：会打出标题/正文、规则的**口径**（白名单/黑名单）、
+    命中哪个词、以及最终判定。判定为"过滤/丢弃"就说明要加词
+    （游戏规则 JSON 或 ``bili白名单``）。
     """
     arg = _args(ev).strip()
     if not arg:
@@ -1052,40 +1061,166 @@ async def _cmd_filter_check(bot: Bot, ev: Event):
         f"图片：{len(images)} 张（动图 {len(animated)} 张）",
     ]
     if preset is None:
-        lines.append("白名单：这个 UP 不在内置游戏规则里 → 不受过滤")
+        lines.append("规则：这个 UP 不在任何启用中的游戏规则里 → 不受过滤")
         lines.append("判定：✅ 会直接推送")
     else:
+        hit_block = preset.match_block(parsed)
         hit = preset.match_keyword(parsed, tuple(cfg.get_list("auto_push_keywords")))
-        lines.append(f"白名单：《{preset.name}》栏目：{'、'.join(preset.pass_keywords)}")
-        if hit:
-            lines.append(f"命中：{hit}")
+        rule_file = preset.source or preset.name + ".json"
+        lines.append(f"规则：《{preset.name}》［{preset.mode_text}］→ {rule_file}")
+        if preset.pass_keywords:
+            lines.append(f"　放行栏目：{'、'.join(preset.pass_keywords)}")
+        if preset.block_keywords:
+            lines.append(f"　屏蔽关键词：{'、'.join(preset.block_keywords)}")
+        if hit_block:
+            lines.append(f"命中「屏蔽」：{hit_block}")
+            lines.append("判定：❌ 会被丢弃（连待定队列都不进）")
+        elif hit:
+            lines.append(f"命中「放行」：{hit}")
             lines.append("判定：✅ 会直接推送")
+        elif preset.is_blacklist:
+            lines.append("命中：（屏蔽关键词一个都没命中）")
+            lines.append("判定：✅ 会直接推送（黑名单口径：默认全推）")
         else:
             lines.append("命中：（一个栏目都没命中）")
             lines.append("判定：❌ 会被过滤（不开待定队列就不推、不通知）")
-            lines.append("要放行：栏目名加进 games.py，或 bili白名单 <关键词>")
+            lines.append(
+                f"要放行：栏目名加进规则文件（{games.rules_dir()} 里的 {rule_file}），"
+                "或 bili白名单 <关键词>"
+            )
     lines.append("")
     lines.append("（只判断，不发送、不动游标；想真发一条用 bili推这条）")
     await reply(bot, ev, "\n".join(lines))
 
 
+def _rules_text() -> str:
+    """``bili过滤规则`` / ``bili游戏规则`` 的正文（规则目录 + 每套规则 + 当前口径）。"""
+    queue_on = bool(cfg.get("queue_unmatched"))
+    enabled = len(cfg.get_list("game_rules_enabled"))
+    return (
+        "【B站订阅·动态过滤（游戏规则）】\n"
+        f"规则目录：{games.rules_dir()}\n"
+        "（一个游戏一个 JSON，文件名就是规则名；改完不用重启。"
+        "新增游戏加个文件，游戏没了直接删文件）\n"
+        f"启用中的规则：{enabled} 条（控制台「启用的游戏规则」里增删）\n"
+        "规则内容也可以直接改 JSON，或在控制台「数据库管理 → 游戏过滤规则」里改\n\n"
+        + "\n".join(games.summary_lines())
+        + "\n白名单口径的规则：「其余」动态"
+        + ("进待定队列（可以推送 <编号> 捞回来）" if queue_on else "直接过滤，不推群也不通知")
+        + "\n　黑名单口径的规则不受它影响：默认全推，只丢命中的屏蔽词"
+        + "\n额外放行关键词：bili白名单 <关键词>（对所有规则生效）"
+        + "\n启停某套规则：bili游戏规则 停用/启用 <规则名>"
+    )
+
+
 @sv_bili_admin.on_fullmatch(("bili过滤规则", "bili游戏"), block=True)
 async def _cmd_filter_rules(bot: Bot, ev: Event):
-    """动态过滤规则：哪些游戏的官方号走白名单、白名单里有哪些栏目。
+    """动态过滤规则：有哪些游戏规则、口径与栏目、规则文件在哪。
 
-    规则不通过命令维护：一个游戏一套写在 ``games.py`` 里，订阅了官方号就自动生效。
+    规则本身是**外挂 JSON**（插件目录的 ``game_rules/``，一个游戏一个文件），
+    订阅了官方号就自动套用，不需要管理员手工维护名单。
     """
-    queue_on = bool(cfg.get("queue_unmatched"))
+    await game_rules_db.sync_now()
+    games.reload()
+    await reply(bot, ev, _rules_text())
+
+
+@sv_bili_admin.on_fullmatch(("bili游戏规则", "bili规则"), block=True)
+async def _cmd_game_rules_view(bot: Bot, ev: Event):
+    """``bili游戏规则``（不带参数）：看有哪些规则、文件在哪、怎么启停。"""
+    await game_rules_db.sync_now()
+    games.reload()
+    await reply(bot, ev, _rules_text())
+
+
+@sv_bili_admin.on_command(("bili游戏规则",), block=True)
+async def _cmd_game_rules(bot: Bot, ev: Event):
+    """游戏规则：停用 / 启用 / 重载 / 同步 / 诊断（规则内容请改 JSON 或控制台的数据库页）。
+
+    这里只改配置项「启用的游戏规则」，**不动 JSON** —— 两种方式等价，
+    哪个顺手用哪个；游戏彻底没了就直接把那个 JSON 删掉。
+    """
+    parts = _args(ev).split()
+    if not parts:
+        await reply(bot, ev, _rules_text())
+        return
+
+    action = parts[0].lower()
+    target = parts[1].strip() if len(parts) > 1 else ""
+
+    if action in ("重载", "reload", "刷新"):
+        games.reload()
+        await reply(bot, ev, "已重新读取规则目录。\n\n" + _rules_text())
+        return
+
+    if action in ("同步", "sync"):
+        did = await game_rules_db.sync_now()
+        games.reload()
+        await reply(
+            bot,
+            ev,
+            ("已同步一轮（有改动，已落盘）\n\n" if did else "已同步一轮（两边一致，没改动）\n\n")
+            + _rules_text(),
+        )
+        return
+
+    if action in ("诊断", "diagnose", "自检", "状态"):
+        await reply(bot, ev, await game_rules_db.diagnose())
+        return
+
+    if action not in ("停用", "启用", "disable", "enable", "关", "开"):
+        await reply(
+            bot,
+            ev,
+            "用法：\n"
+            "· bili游戏规则                      查看规则\n"
+            "· bili游戏规则 停用 <规则名>        停用一套规则\n"
+            "· bili游戏规则 启用 <规则名>        重新启用\n"
+            "· bili游戏规则 重载                 重新读 game_rules/ 里的 JSON\n"
+            "· bili游戏规则 同步                 和数据库管理页对齐一轮\n"
+            "· bili游戏规则 诊断                 看同步/数据库状态（控制台没数据时用）",
+        )
+        return
+
+    if not target:
+        await reply(bot, ev, "要给个规则名，例如：bili游戏规则 停用 异环")
+        return
+
+    preset = games.find_by_name(target)
+    if preset is None:
+        names = "、".join(games.all_presets()) or "（一个都没有）"
+        await reply(bot, ev, f"找不到规则「{target}」\n目录里的规则：{names}")
+        return
+
+    # 规则名 = JSON 文件名（不带扩展名）：配置项「启用的游戏规则」就是按它来认的
+    rule_name = preset.source[:-5] if preset.source.lower().endswith(".json") else preset.source
+    rule_name = rule_name or preset.name
+    turn_off = action in ("停用", "disable", "关")
+
+    enabled = list(cfg.get_list("game_rules_enabled"))
+    if turn_off:
+        enabled = [x for x in enabled if x not in (rule_name, preset.name)]
+    elif rule_name not in enabled:
+        enabled.append(rule_name)
+    if not cfg.set_value("game_rules_enabled", enabled):
+        await reply(bot, ev, "写入配置失败：请到 Web 控制台改「启用的游戏规则」")
+        return
+
+    games.reload()
+
     await reply(
         bot,
         ev,
-        "【B站订阅·动态过滤（白名单）】\n"
-        + "\n".join(games.summary_lines())
-        + f"\n\n当前口径：没命中白名单的动态"
-        + ("进待定队列（可以推送 <编号> 捞回来）" if queue_on else "直接过滤，不推群也不通知")
-        + "\n额外白名单关键词：bili白名单 <关键词>"
-        + "\n订阅上面的官方号就自动生效，不用手动加名单；"
-        "\n要新增游戏 / 调整某个游戏的白名单：改插件目录里的 games.py（一个游戏一条）",
+        f"已{'停用' if turn_off else '启用'}《{preset.name}》（规则 {rule_name}）\n"
+        + (
+            "停用后这个官方号的动态不再走规则过滤，和普通 UP 一样照单全推"
+            if turn_off
+            else f"启用后按{preset.mode_text}口径过滤：" + (
+                "默认全推，命中屏蔽词才不推" if preset.is_blacklist else "命中放行栏目才推群"
+            )
+        )
+        + "\n\n"
+        + _rules_text(),
     )
 
 
@@ -1424,7 +1559,7 @@ async def _check_one(uid: str, info: Dict) -> Optional[Dict]:
     name = str(info.get("name") or "")
     update: Dict = {}
 
-    # 官方号（内置游戏白名单里）：非视频动态按该游戏的白名单过滤
+    # 官方号（命中某个启用中的游戏规则）：非视频动态按该游戏的白名单过滤
     preset = games.find_by_uid(uid)
 
     # ---------- 动态 ----------
@@ -1479,10 +1614,12 @@ async def _check_one(uid: str, info: Dict) -> Optional[Dict]:
                     # 普通 UP 一律 PUSH，所以下面两个分支里 preset 一定不是 None。
                     decision = _decide_how(preset, kind, p) if enabled else None
                     if decision == games.FILTER:
+                        # FILTER 只有一个来源：命中了 block_keywords（两种口径都一样）
                         runtime.STATE["filtered"] = int(runtime.STATE.get("filtered") or 0) + 1
                         logger.info(
                             f"B站订阅：{name or uid} 的动态 {p.get('id_str')} "
-                            f"按《{preset.name}》的白名单规则过滤掉"
+                            f"命中《{preset.name}》的屏蔽关键词"
+                            f"（{preset.match_block(p) or ''}），这条不推"
                         )
                     elif decision == games.PENDING:
                         if cfg.get("queue_unmatched"):
@@ -1492,7 +1629,7 @@ async def _check_one(uid: str, info: Dict) -> Optional[Dict]:
                             await pending.notify_pending(item)
                             logger.info(
                                 f"B站订阅：{name or uid} 的动态 {p.get('id_str')} 没命中"
-                                f"《{preset.name}》白名单，进待定队列 #{item.get('seq')}"
+                                f"《{preset.name}》的放行栏目，进待定队列 #{item.get('seq')}"
                             )
                         else:
                             runtime.STATE["filtered"] = (
@@ -1500,7 +1637,7 @@ async def _check_one(uid: str, info: Dict) -> Optional[Dict]:
                             )
                             logger.info(
                                 f"B站订阅：{name or uid} 的动态 {p.get('id_str')} 没命中"
-                                f"《{preset.name}》白名单，已过滤（不推群）"
+                                f"《{preset.name}》的放行栏目，已过滤（不推群）"
                             )
                     elif decision == games.PUSH and targets:
                         # 卡片（头部+标题+正文+首图）+ 其余图单独补发 + 长文合并转发
@@ -1601,6 +1738,13 @@ async def _check_one(uid: str, info: Dict) -> Optional[Dict]:
 
 async def check_all() -> int:
     """跑一轮检查，返回本轮有记录的 UP 数。"""
+    # 游戏规则的双向同步（文件 ↔ 数据库）。放在轮询里顺带跑：控制台里改完，
+    # 最多等到下一轮就落到 JSON 上；后台任务（ensure_loop）会跑得更勤。
+    try:
+        await game_rules_db.sync_now()
+    except Exception as e:
+        logger.warning(f"B站订阅：游戏规则同步出错（{type(e).__name__}: {e}）")
+
     if api.rate_limited:
         logger.warning("B站订阅：接口正在风控静默期，跳过本轮检查")
         return 0

@@ -33,6 +33,7 @@
 ## 丨我该如何安装该插件？
 
 - 前提：你已经部署好 [gsuid_core](https://github.com/Genshin-bots/gsuid_core)。
+- 国内镜像地址：https://cnb.cool/as-sin/BiliSubscribe
 - 将本仓库克隆到 GsCore 插件目录并重启：
 
 ```bash
@@ -67,9 +68,10 @@ git clone https://github.com/assin001/BiliSubscribe BiliSubscribe
 | `bili配置` / `bili修改配置 <项> <值>` | 查看 / 修改配置 |
 | `bili检查更新` | 立刻跑一轮检查 |
 | `bili推这条 <链接\|ID\|cv号\|BV号\|短链> [订阅群]` | 手动补推一条动态或视频（默认推到本会话） |
-| `bili过滤规则`（别名 `bili游戏`） | 查看内置白名单：哪些游戏、哪些栏目、没命中的怎么处理 |
+| `bili过滤规则`（别名 `bili游戏`） | 查看游戏规则：有哪些、口径（黑白名单）、关键词、规则文件在哪 |
+| `bili游戏规则 [停用\|启用 <规则名>]` | 停用 / 启用一套规则；`重载` 重读规则目录，`同步` 和数据库管理页对齐 |
 | `bili过滤测试 <链接\|ID>` | 给一条动态看它会不会被推（只判断、不发送、不动游标） |
-| `bili白名单 <关键词\|取消 关键词>` | 额外白名单关键词：命中就直接推 |
+| `bili白名单 <关键词\|取消 关键词>` | 额外放行关键词：命中就直接推（对所有规则生效） |
 | `bili待定` / `可以推送 <编号\|全部>` / `bili跳过 <编号\|全部>` | 看待定队列 / 把待定项推送出去 / 过滤掉 |
 
 > 命令前缀遵循 GsCore 的全局前缀配置（比如 `#bili订阅 123` 或直接 `bili订阅 123`）。
@@ -78,7 +80,7 @@ git clone https://github.com/assin001/BiliSubscribe BiliSubscribe
 
 ## 丨配置说明
 
-可在 **GsCore 网页控制台**「插件 → BiliSubscribe → 配置」页面可视化配置，改完立即生效；也可以在群里用 `bili修改配置` 改。下面是常用项，完整 24 项见[完整文档](./README-Detailed.md)：
+可在 **GsCore 网页控制台**「插件 → BiliSubscribe → 配置」页面可视化配置，改完立即生效；也可以在群里用 `bili修改配置` 改。下面是常用项，完整 25 项见[完整文档](./README-Detailed.md)：
 
 | 配置项 | 类型 | 默认值 | 说明 |
 |:---|:---|:---|:---|
@@ -93,7 +95,8 @@ git clone https://github.com/assin001/BiliSubscribe BiliSubscribe
 | `cache_ttl_days` | `int` | `15` | 图片缓存天数：头像这类重复图同一个 URL 只下一次 |
 | `max_uid_per_round` / `max_push_per_round` | `int` | `20` / `5` | 单轮检查的 UP 上限 / 单轮每 UP 最多补推几条 |
 | `push_full_text` | `bool` | `false` | 长文是否在卡片之外补发全文（默认只发预览） |
-| `queue_unmatched` | `bool` | `false` | 没命中白名单的动态是否进待定队列（默认直接过滤） |
+| `queue_unmatched` | `bool` | `false` | **白名单口径**下没命中的动态是否进待定队列（默认直接过滤） |
+| `game_rules_enabled` | `list` | 全部规则名 | 启用的游戏规则（默认把 `game_rules/` 里现有的全列上 = 全部启用；删掉哪项就停用哪个） |
 
 > 订阅数据的开关是**按群、按 UP 单独存**的：同一个 UP，A 群只收视频、B 群只收动态都是合法需求，用 `bili设置` 调。
 
