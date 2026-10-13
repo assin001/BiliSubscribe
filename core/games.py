@@ -22,20 +22,25 @@
 - ``whitelist``（白名单，默认）：只有命中的才推，其余过滤。
   适合标题就写清栏目的（异环：``活动日历`` ``角色档案`` ``更新公告``…）。
 
-     命中 pass_keywords → 直接推群；其余 → 过滤/待定
+    命中 dynamic_pass_keywords（动态）/ video_pass_keywords（视频）→ 直接推群；其余 → 过滤/待定
 
 - ``blacklist``（黑名单）：默认全推，只挡掉命中的。
   适合标题看不出类型、正文措辞又不固定的（卡拉彼丘：日常的安全巡查公告之类）。
 
-     命中 block_keywords → 直接丢弃；其余 → 直接推群
+    命中 dynamic_block_keywords（动态）/ video_block_keywords（视频）→ 直接丢弃；其余 → 直接推群
 
-两种模式共有：
+**动态、视频各管一套词**（互不影响）：
 
-- ``pass_keywords`` 命中 → **直接推群**（黑名单模式下也能用，用来捞回被误挡的）；
-- ``block_keywords`` 命中 → **直接丢弃**（不推群、不通知、连待定队列都不进），**优先于** pass；
-- 投稿视频不受影响，照常自动推送（视频本来就是官方号的主内容）；
+- 动态（图文 / 专栏 / 转发）：``dynamic_pass_keywords`` / ``dynamic_block_keywords``，
+  匹配范围是**标题 + 正文**（有的栏目写在标题里，有的写在正文里）；
+- 视频（投稿列表 + 动态流里的投稿卡片）：``video_pass_keywords`` / ``video_block_keywords``，
+  匹配范围**只有标题** —— 简介里常提联动、别的游戏名，带上容易误伤；
+- 两种口径共有：放行词命中 → **直接推群**（黑名单模式下也能用，用来捞回被误挡的）；
+  屏蔽词命中 → **直接丢弃**（不推群、不通知、连待定队列都不进），**优先于**放行词；
+- **视频 / 动态还要各自开开关**（``filter_dynamic`` / ``filter_video``，**每条规则自己定**）：
+  默认只过滤动态、投稿视频照常自动推；两个都开就都过滤；
 - 白名单模式下"其余"要不要留一份待定，由配置 ``queue_unmatched`` 决定
-  （默认直接过滤，开了就进待定队列、等你手动 ``可以推送``）。
+  （默认直接过滤，开了就进待定队列、等你手动 ``可以推送``）。视频不进待定队列。
 
 规则**不写死在代码里**，就放在插件目录的 ``game_rules/`` 下（随插件分发，
 和 ``fonts/`` / ``assets/`` 并列），**一个游戏一个 JSON**：
@@ -43,20 +48,25 @@
 - **新增游戏**：往里加一个 ``<游戏名>.json``（照抄 ``异环.json`` 或 ``卡拉彼丘.json``）；
 - **改规则内容**：直接改 JSON，**或者**去控制台「数据库管理 → 游戏过滤规则」里改
   （那边改完会自动写回 JSON，见 ``core/game_rules_db.py``）；
-- **停用某个游戏**：把规则名从配置项「启用的游戏规则」里删掉
-  （也可以 ``bili游戏规则 停用 <规则名>``）；
+- **停用某个游戏**：``bili游戏规则 停用 <规则名>``（它会往该 JSON 里写 ``enabled: false``）。
+  新加的 JSON 会被**自动**加进配置项「启用的游戏规则」，所以停用状态得落在文件里，
+  光把配置项里那一项删掉下次启动会被自动补回来；
 - **游戏没了**：**直接删掉那个 JSON** —— 代码不会再生成它，删了就是删了。
 
 文件格式（**文件名就是规则名**，启停 / 展示都用它）::
 
     {
-      "name": "异环",                        // 展示名，缺省用文件名
-      "enabled": true,                       // false = 不启用（该官方号不再走本规则）
-      "mode": "whitelist",                   // whitelist（默认）/ blacklist
-      "uids": {"3546636978489848": "异环"},   // 官方号 {UID: 号的名字}，可以多个
-      "pass_keywords": ["活动日历"],          // 标题/正文命中 → 直接推群
-      "block_keywords": ["安全巡查公告"],      // 标题/正文命中 → 直接丢弃
-      "note": "……"                           // 展示用说明，可省
+      "name": "异环",                              // 展示名，缺省用文件名
+      "enabled": true,                             // false = 不启用（该官方号不再走本规则）
+      "mode": "whitelist",                         // whitelist（默认）/ blacklist
+      "uids": {"3546636978489848": "异环"},         // 官方号 {UID: 号的名字}，可以多个
+      "filter_dynamic": true,                       // 动态走不走本规则（默认 true）
+      "filter_video": false,                        // 投稿视频也走本规则？（默认 false）
+      "dynamic_pass_keywords": ["活动日历"],         // 动态：标题/正文命中 → 直接推群
+      "dynamic_block_keywords": ["安全巡查公告"],    // 动态：标题/正文命中 → 直接丢弃
+      "video_pass_keywords": [],                    // 视频：标题命中 → 直接推群
+      "video_block_keywords": [],                    // 视频：标题命中 → 直接丢弃
+      "note": "……"                                 // 展示用说明，可省
     }
 
 改完**不用重启**：每次取规则时按目录的「文件名 + 修改时间」判断要不要重读
@@ -106,11 +116,15 @@ class GamePreset:
         name: str,
         uids: Dict[str, str],
         mode: str = MODE_WHITELIST,
-        pass_keywords: "Tuple[str, ...]" = (),
-        block_keywords: "Tuple[str, ...]" = (),
+        dynamic_pass_keywords: "Tuple[str, ...]" = (),
+        dynamic_block_keywords: "Tuple[str, ...]" = (),
+        video_pass_keywords: "Tuple[str, ...]" = (),
+        video_block_keywords: "Tuple[str, ...]" = (),
         enabled: bool = True,
         note: str = "",
         source: str = "",
+        filter_dynamic: bool = True,
+        filter_video: bool = False,
     ):
         self.name = str(name)
         # {UID: 号的名字}，一个游戏可以有多个官方号
@@ -119,11 +133,26 @@ class GamePreset:
             for k, v in (uids or {}).items()
         }
         self.mode = mode if mode in (MODE_WHITELIST, MODE_BLACKLIST) else MODE_WHITELIST
-        self.pass_keywords = tuple(str(k) for k in pass_keywords if str(k).strip())
-        self.block_keywords = tuple(str(k) for k in block_keywords if str(k).strip())
+        # 两套词，互不影响：动态看 dynamic_*，视频看 video_*
+        self.dynamic_pass_keywords = tuple(str(k) for k in dynamic_pass_keywords if str(k).strip())
+        self.dynamic_block_keywords = tuple(str(k) for k in dynamic_block_keywords if str(k).strip())
+        self.video_pass_keywords = tuple(str(k) for k in video_pass_keywords if str(k).strip())
+        self.video_block_keywords = tuple(str(k) for k in video_block_keywords if str(k).strip())
         self.enabled = bool(enabled)
         self.note = str(note or "")
         self.source = str(source or "")  # JSON 文件名（= 规则名）
+        # 这条规则管哪类内容（规则文件里的两个开关）：
+        # 动态默认开（老行为）；视频默认关（投稿视频照常自动推）
+        self.filter_dynamic = bool(filter_dynamic)
+        self.filter_video = bool(filter_video)
+
+    def filters(self, kind: str) -> bool:
+        """这类内容要不要走本规则：``video`` 看 video 开关，``live`` 恒不过滤，其余看动态开关。"""
+        if kind == "video":
+            return self.filter_video
+        if kind == "live":
+            return False
+        return self.filter_dynamic
 
     @property
     def is_blacklist(self) -> bool:
@@ -137,37 +166,65 @@ class GamePreset:
     def uid_of(self) -> List[str]:
         return list(self.uids)
 
+    def keywords_for(self, kind: str) -> "Tuple[Tuple[str, ...], Tuple[str, ...]]":
+        """这类内容用哪套词（放行, 屏蔽）：视频用 ``video_*``，其余（动态）用 ``dynamic_*``。"""
+        if kind == "video":
+            return self.video_pass_keywords, self.video_block_keywords
+        return self.dynamic_pass_keywords, self.dynamic_block_keywords
+
     @staticmethod
-    def _blob(parsed: Dict) -> str:
-        """匹配范围是**标题 + 正文**（有的栏目写在标题里，有的写在正文里）。"""
-        return f"{parsed.get('title') or ''}\n{parsed.get('text') or ''}"
+    def _blob(parsed: Dict, kind: str = "") -> str:
+        """匹配范围：动态是**标题 + 正文**，视频**只有标题**。
 
-    def match_keyword(self, parsed: Dict, extra_keywords: "Tuple[str, ...]" = ()) -> Optional[str]:
-        """命中了哪个「放行」关键词？没命中返回 None。"""
-        blob = self._blob(parsed)
-        for kw in list(self.pass_keywords) + list(extra_keywords):
+        视频（投稿列表条目 / 动态流里的投稿卡片）的简介里常提联动、别的游戏名，
+        带上容易误伤，所以视频只用标题判。
+        """
+        title = str(parsed.get("title") or "")
+        if kind == "video":
+            return title
+        return f"{title}\n{parsed.get('text') or parsed.get('description') or ''}"
+
+    def match_keyword(
+        self,
+        parsed: Dict,
+        extra_keywords: "Tuple[str, ...]" = (),
+        kind: str = "",
+    ) -> Optional[str]:
+        """命中了哪个「放行」关键词？没命中返回 None。
+
+        ``extra_keywords``（``bili白名单`` 的全局放行词）对所有内容生效，视频也认。
+        """
+        blob = self._blob(parsed, kind)
+        pass_keywords, _ = self.keywords_for(kind)
+        for kw in list(pass_keywords) + list(extra_keywords):
             if kw and kw in blob:
                 return str(kw)
         return None
 
-    def match_block(self, parsed: Dict) -> Optional[str]:
+    def match_block(self, parsed: Dict, kind: str = "") -> Optional[str]:
         """命中了哪个「屏蔽」关键词？没命中返回 None。"""
-        blob = self._blob(parsed)
-        for kw in self.block_keywords:
+        blob = self._blob(parsed, kind)
+        _, block_keywords = self.keywords_for(kind)
+        for kw in block_keywords:
             if kw and kw in blob:
                 return str(kw)
         return None
 
-    def decide(self, parsed: Dict, extra_keywords: "Tuple[str, ...]" = ()) -> str:
-        """这条动态怎么处理：``PUSH`` / ``PENDING`` / ``FILTER``。
+    def decide(
+        self,
+        parsed: Dict,
+        extra_keywords: "Tuple[str, ...]" = (),
+        kind: str = "",
+    ) -> str:
+        """这条内容怎么处理：``PUSH`` / ``PENDING`` / ``FILTER``。
 
         顺序：**屏蔽词**（显式丢弃的意图最强）→ **放行词** → 兜底按口径走
         （白名单 = 过滤/待定，黑名单 = 直接推）。
-        ``extra_keywords`` 是管理员额外加的（``bili白名单``），对所有游戏生效。
+        ``kind`` 决定用哪套词、匹配多大范围（见 ``_blob`` / ``keywords_for``）。
         """
-        if self.match_block(parsed):
+        if self.match_block(parsed, kind):
             return FILTER
-        if self.match_keyword(parsed, extra_keywords):
+        if self.match_keyword(parsed, extra_keywords, kind):
             return PUSH
         return PUSH if self.is_blacklist else PENDING
 
@@ -231,6 +288,42 @@ def _note_disabled(d: Path, names: List[str], total: int) -> None:
         logger.info(f"B站订阅：这些规则文件存在但没启用：{'、'.join(names)}（{tip}）")
 
 
+def _effective_enabled(d: Path) -> "Tuple[str, ...]":
+    """当前该启用哪些规则：配置名单 **+ 目录里新出现的**（会自动补进配置）。
+
+    名单是**首次安装时**快照进配置的（见 ``config._default_game_rules_enabled``），
+    之后往 ``game_rules/`` 里加文件不会自动进去 —— 表现就是"文件加了却什么都没发生、
+    控制台里也看不见它"。所以这里把目录里**没在名单里、又没写 ``enabled: false``**
+    的规则补进名单，并写回配置（这样控制台「启用的游戏规则」里也能看到）。
+
+    **停用**请用 ``bili游戏规则 停用 <规则名>`` —— 它会往该 JSON 里写 ``enabled: false``，
+    只要写了这里就不会再把它补回来。
+    """
+    names = [str(x).strip() for x in cfg.get_list("game_rules_enabled") if str(x).strip()]
+    known = set(names)
+    added: List[str] = []
+    for path in sorted(d.glob(_JSON_GLOB)):
+        if path.stem in known:
+            continue
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(raw, dict):
+            continue
+        if not _as_bool(raw.get("enabled"), True):
+            continue  # JSON 里明确停用的，别补回去
+        added.append(path.stem)
+    if not added:
+        return tuple(names)
+    try:
+        cfg.set_value("game_rules_enabled", names + added)
+        logger.info(f"B站订阅：新规则自动加入「启用的游戏规则」：{'、'.join(added)}")
+    except Exception as e:
+        logger.warning(f"B站订阅：自动补「启用的游戏规则」失败（{e}），本次仍按已启用处理")
+    return tuple(names + added)
+
+
 def _as_str_list(raw: Any) -> List[str]:
     """接受 JSON 数组，也接受 ``"a,b,c"`` 这种逗号串。"""
     if isinstance(raw, str):
@@ -264,8 +357,8 @@ def _as_mode(raw: Any, default: str = MODE_WHITELIST) -> str:
 def _read_one(path: Path, enabled_names: "Tuple[str, ...]") -> Optional[GamePreset]:
     """读一个规则文件；格式不对就记日志跳过（不影响其它规则）。
 
-    **启停只看配置项「启用的游戏规则」**：规则名在列表里才生效。文件里那个
-    ``enabled`` 字段只在"第一次生成配置默认值"时用过（见 config.py），运行时不再看。
+    启停看两处：既要在配置项「启用的游戏规则」名单里（**新加的规则文件会被自动补进去**，
+    见 ``_effective_enabled``），又要文件里没写 ``enabled: false``。
     """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
@@ -283,18 +376,27 @@ def _read_one(path: Path, enabled_names: "Tuple[str, ...]") -> Optional[GamePres
         logger.warning(f"B站订阅：游戏规则 {path.name} 没写 uids（官方号），已跳过")
         return None
 
+    # 老名字兼容：pass_keywords / block_keywords 就是「动态」那套词，
+    # filter_keywords 是更早的名字（当年只有一套词）
+    dyn_pass = raw.get("dynamic_pass_keywords", raw.get("pass_keywords"))
+    dyn_block = raw.get(
+        "dynamic_block_keywords",
+        raw.get("block_keywords", raw.get("filter_keywords")),
+    )
     return GamePreset(
         name=name,
         uids=uids,
         mode=_as_mode(raw.get("mode")),
-        pass_keywords=_as_str_list(raw.get("pass_keywords")),
-        # block_keywords 是正式名；早期版本叫 filter_keywords，兼容一下
-        block_keywords=_as_str_list(
-            raw.get("block_keywords", raw.get("filter_keywords"))
-        ),
-        enabled=stem in enabled_names,
+        dynamic_pass_keywords=_as_str_list(dyn_pass),
+        dynamic_block_keywords=_as_str_list(dyn_block),
+        video_pass_keywords=_as_str_list(raw.get("video_pass_keywords")),
+        video_block_keywords=_as_str_list(raw.get("video_block_keywords")),
+        enabled=stem in enabled_names and _as_bool(raw.get("enabled"), True),
         note=str(raw.get("note") or ""),
         source=path.name,
+        # 这条规则管哪类内容：JSON 里的两个开关（缺省 = 动态过滤、视频不过滤，保持老行为）
+        filter_dynamic=_as_bool(raw.get("filter_dynamic"), True),
+        filter_video=_as_bool(raw.get("filter_video"), False),
     )
 
 
@@ -310,7 +412,7 @@ def load(force: bool = False) -> Dict[str, GamePreset]:
 
     d = rules_dir()
     sig = _signature(d)
-    enabled_names = tuple(str(x).strip() for x in cfg.get_list("game_rules_enabled") if str(x).strip())
+    enabled_names = _effective_enabled(d)
     if not force and _CACHE["sig"] == sig and _CACHE["enabled"] == enabled_names:
         _CACHE["checked_at"] = now
         return _CACHE["presets"]
@@ -333,6 +435,45 @@ def load(force: bool = False) -> Dict[str, GamePreset]:
 def reload() -> Dict[str, GamePreset]:
     """强制重读一遍（``bili游戏规则 重载`` / 改了文件想立刻生效时用）。"""
     return load(force=True)
+
+
+def set_enabled(stem: str, on: bool) -> bool:
+    """把某条规则的开关写进它的 JSON（``enabled`` 字段），并同步配置名单。
+
+    ``bili游戏规则 停用/启用`` 走这里。停用状态必须落在 **JSON** 上 ——
+    只改配置名单的话，下次启动会被 ``_effective_enabled`` 的"自动补齐"再补回来。
+    """
+    path = rules_dir() / f"{stem}.json"
+    if not path.is_file():
+        return False
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning(f"B站订阅：规则 {path.name} 读不了（{e}）")
+        return False
+    if not isinstance(raw, dict):
+        return False
+
+    raw["enabled"] = bool(on)
+    try:
+        path.write_text(
+            json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    except OSError as e:
+        logger.warning(f"B站订阅：写规则文件 {path.name} 失败（{e}）")
+        return False
+
+    names = [str(x).strip() for x in cfg.get_list("game_rules_enabled") if str(x).strip()]
+    names = [n for n in names if n != stem]
+    if on:
+        names.append(stem)
+    try:
+        cfg.set_value("game_rules_enabled", names)
+    except Exception as e:
+        logger.warning(f"B站订阅：更新「启用的游戏规则」失败（{e}）")
+
+    reload()
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -373,19 +514,31 @@ def find_by_name(text: str) -> Optional[GamePreset]:
     return None
 
 
+def scope_text(preset: "GamePreset") -> str:
+    """这条规则管哪些内容（规则文件里的 ``filter_dynamic`` / ``filter_video``）。"""
+    if preset.filter_dynamic and preset.filter_video:
+        return "视频、动态都过滤"
+    if preset.filter_video:
+        return "只过滤视频；动态照常推"
+    if preset.filter_dynamic:
+        return "只过滤动态；投稿视频照常推"
+    return "视频、动态都不过滤"
+
+
 def filter_notice(uid: str) -> str:
-    """订阅时的提示：这个 UP 的动态要走游戏规则过滤（口径按该规则自己的）。"""
+    """订阅时的提示：这个 UP 会走游戏规则过滤（口径与范围按规则文件）。"""
     preset = find_by_uid(uid)
     if preset is None:
         return ""
+    scope = scope_text(preset)
     if preset.is_blacklist:
         return (
-            f"\n注意：这是《{preset.name}》官方号，动态按**黑名单**过滤——"
-            "默认照常推，只有命中屏蔽词（日常公告这类）才不推；投稿视频照常自动推送"
+            f"\n注意：这是《{preset.name}》官方号，按**黑名单**口径过滤（{scope}）——"
+            "默认照常推，只有命中屏蔽词（日常公告这类）才不推"
         )
     return (
-        f"\n注意：这是《{preset.name}》官方号，动态按**白名单**过滤——"
-        "命中固定栏目才推群，其它（推广、联动、抽奖等）过滤掉；投稿视频照常自动推送"
+        f"\n注意：这是《{preset.name}》官方号，按**白名单**口径过滤（{scope}）——"
+        "命中固定栏目才推群，其它（推广、联动、抽奖等）过滤掉"
     )
 
 
@@ -413,9 +566,19 @@ def summary_lines() -> List[str]:
         )
         uids = "、".join(f"{name}（{uid}）" for uid, name in preset.uids.items())
         lines.append(f"  官方号：{uids}")
-        lines.append(f"  放行栏目：{'、'.join(preset.pass_keywords) or '（无）'}")
-        if preset.block_keywords:
-            lines.append(f"  屏蔽关键词：{'、'.join(preset.block_keywords)}")
+        lines.append(f"  范围：{scope_text(preset)}")
+        if preset.filter_dynamic:
+            lines.append(
+                f"  动态放行：{'、'.join(preset.dynamic_pass_keywords) or '（无）'}"
+            )
+            if preset.dynamic_block_keywords:
+                lines.append(f"  动态屏蔽：{'、'.join(preset.dynamic_block_keywords)}")
+        if preset.filter_video:
+            lines.append(
+                f"  视频放行（只按标题）：{'、'.join(preset.video_pass_keywords) or '（无）'}"
+            )
+            if preset.video_block_keywords:
+                lines.append(f"  视频屏蔽（只按标题）：{'、'.join(preset.video_block_keywords)}")
         if preset.note:
             lines.append(f"  说明：{preset.note}")
         if preset.is_blacklist:

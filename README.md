@@ -96,7 +96,7 @@ git clone https://github.com/assin001/BiliSubscribe BiliSubscribe
 | `max_uid_per_round` / `max_push_per_round` | `int` | `20` / `5` | 单轮检查的 UP 上限 / 单轮每 UP 最多补推几条 |
 | `push_full_text` | `bool` | `false` | 长文是否在卡片之外补发全文（默认只发预览） |
 | `queue_unmatched` | `bool` | `false` | **白名单口径**下没命中的动态是否进待定队列（默认直接过滤） |
-| `game_rules_enabled` | `list` | 全部规则名 | 启用的游戏规则（默认把 `game_rules/` 里现有的全列上 = 全部启用；删掉哪项就停用哪个） |
+| `game_rules_enabled` | `list` | 全部规则名 | 启用的游戏规则（**自动维护**：往 `game_rules/` 加个 JSON 会自动补进来。停用某条用 `bili游戏规则 停用 <规则名>`，它会往该 JSON 写 `enabled: false`） |
 
 > 订阅数据的开关是**按群、按 UP 单独存**的：同一个 UP，A 群只收视频、B 群只收动态都是合法需求，用 `bili设置` 调。
 

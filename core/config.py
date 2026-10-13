@@ -116,7 +116,7 @@ def _default_game_rules_enabled() -> List[str]:
     全都显示"，去掉哪个就在控制台把哪一项删掉。
 
     规则文件里写了 ``"enabled": false`` 的算"出厂默认不启用"，不进这个默认值；
-    运行时不再看文件里那个字段（启停只看配置项）。
+    运行时同样认这个字段（见 ``games._read_one``），而且新加的文件会被自动补进这份名单。
     """
     names: List[str] = []
     try:
@@ -333,15 +333,15 @@ def _build_gsc_default() -> Optional[Dict[str, Any]]:
             "动态过滤（游戏规则）",
             f"官方号按自己的规则过滤，规则目录：{GAME_RULES_DIR}"
             "（一个游戏一个 JSON，文件名就是规则名）。每套规则自己选口径："
-            "whitelist = 命中放行栏目才推、其余过滤；blacklist = 默认全推、只丢命中的屏蔽词。"
+            "whitelist = 命中放行词才推、其余过滤；blacklist = 默认全推、只丢命中的屏蔽词。"
             "规则内容也可以在「数据库管理 → 游戏过滤规则」里直接看和改（改完自动写回 JSON）。"
             "新增/删除规则请加/删 JSON 文件；改完不用重启。当前规则用 bili过滤规则 查看",
         ),
         "game_rules_enabled": GsListStrConfig(
             "启用的游戏规则",
-            "默认把 game_rules/ 里现有的规则**全部**列在这里 = 全部启用。"
-            "要去掉哪个就把哪一项删掉（删掉 = 停用，该官方号不再走规则过滤，和普通 UP 一样照单全推）；"
-            "删光了就是全部停用。想加回来就填规则名（JSON 文件名，不含 .json）",
+            "**自动维护**：往 game_rules/ 里加一个 JSON，这里会自动多出一项（= 自动启用），"
+            "不用手填。要停用某条规则请用 bili游戏规则 停用 <规则名> —— 它会往那个 JSON 里"
+            "写 enabled: false；只把这里的项删掉的话，下次启动会被自动补回来",
             _default_game_rules_enabled(),
         ),
         "auto_push_keywords": GsListStrConfig(

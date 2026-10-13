@@ -98,8 +98,12 @@ try:
         name: str = Field(default="", title="游戏名（展示用）")
         mode: str = Field(default="whitelist", title="口径：whitelist=白名单 / blacklist=黑名单")
         uids: str = Field(default="", title="官方号（每行一个 UID=名字）")
-        pass_keywords: str = Field(default="", title="放行关键词（每行一个）")
-        block_keywords: str = Field(default="", title="屏蔽关键词（每行一个）")
+        dynamic_pass_keywords: str = Field(default="", title="动态放行词（每行一个）")
+        dynamic_block_keywords: str = Field(default="", title="动态屏蔽词（每行一个）")
+        video_pass_keywords: str = Field(default="", title="视频放行词（每行一个，只按标题）")
+        video_block_keywords: str = Field(default="", title="视频屏蔽词（每行一个，只按标题）")
+        filter_dynamic: str = Field(default="1", title="动态走本规则（1=是 / 0=否）")
+        filter_video: str = Field(default="0", title="视频走本规则（1=是 / 0=否）")
         note: str = Field(default="", title="说明")
         rev: str = Field(default="", title="同步指纹，请勿手改")
 
@@ -129,10 +133,24 @@ NEW_COLUMNS: Tuple[str, ...] = (
     f"ALTER TABLE {TABLE_NAME} ADD COLUMN name TEXT DEFAULT ''",
     f"ALTER TABLE {TABLE_NAME} ADD COLUMN mode TEXT DEFAULT 'whitelist'",
     f"ALTER TABLE {TABLE_NAME} ADD COLUMN uids TEXT DEFAULT ''",
-    f"ALTER TABLE {TABLE_NAME} ADD COLUMN pass_keywords TEXT DEFAULT ''",
-    f"ALTER TABLE {TABLE_NAME} ADD COLUMN block_keywords TEXT DEFAULT ''",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN dynamic_pass_keywords TEXT DEFAULT ''",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN dynamic_block_keywords TEXT DEFAULT ''",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN video_pass_keywords TEXT DEFAULT ''",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN video_block_keywords TEXT DEFAULT ''",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN filter_dynamic TEXT DEFAULT '1'",
+    f"ALTER TABLE {TABLE_NAME} ADD COLUMN filter_video TEXT DEFAULT '0'",
     f"ALTER TABLE {TABLE_NAME} ADD COLUMN note TEXT DEFAULT ''",
     f"ALTER TABLE {TABLE_NAME} ADD COLUMN rev TEXT DEFAULT ''",
+)
+# 更早的表列叫 pass_keywords / block_keywords（当年只有动态那一套词）：
+# 新列补好后把老数据搬过去，免得老库的"动态词一夜清空"
+MIGRATE_COLUMNS: Tuple[str, ...] = (
+    f"UPDATE {TABLE_NAME} SET dynamic_pass_keywords = pass_keywords "
+    f"WHERE (dynamic_pass_keywords IS NULL OR dynamic_pass_keywords = '') "
+    f"AND pass_keywords IS NOT NULL AND pass_keywords != ''",
+    f"UPDATE {TABLE_NAME} SET dynamic_block_keywords = block_keywords "
+    f"WHERE (dynamic_block_keywords IS NULL OR dynamic_block_keywords = '') "
+    f"AND block_keywords IS NOT NULL AND block_keywords != ''",
 )
 
 
@@ -184,6 +202,24 @@ def _list_to_text(items: Any) -> str:
     return "\n".join(str(x).strip() for x in (items or []) if str(x).strip())
 
 
+def _as_bool(raw: Any, default: bool) -> bool:
+    """开关字段：JSON 里写 ``true`` / ``"开"`` / ``1`` 都认，认不出用 default。
+
+    和 games.py 的 ``_as_bool`` 口径保持一致（这里不 import 它，免得绕出依赖）。
+    """
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s in ("1", "true", "on", "yes", "开", "是", "启用", "开启"):
+            return True
+        if s in ("0", "false", "off", "no", "关", "否", "禁用", "关闭"):
+            return False
+    return default
+
+
 # ---------------------------------------------------------------------------
 # 内容指纹：只认"能落到表里的那几个字段"，改 ``_说明`` 之类不算改动
 # ---------------------------------------------------------------------------
@@ -191,9 +227,13 @@ def _canon(
     name: Any,
     mode: Any,
     uids: Any,
-    pass_keywords: Any,
-    block_keywords: Any,
+    dynamic_pass_keywords: Any,
+    dynamic_block_keywords: Any,
+    video_pass_keywords: Any,
+    video_block_keywords: Any,
     note: Any,
+    filter_dynamic: Any = True,
+    filter_video: Any = False,
 ) -> Dict[str, Any]:
     if isinstance(uids, str):
         pairs = _text_to_rows(uids)
@@ -207,15 +247,31 @@ def _canon(
         "name": str(name or "").strip(),
         "mode": str(mode or "whitelist").strip().lower() or "whitelist",
         "uids": sorted(pairs.items()),
-        "pass": _any_list(pass_keywords),
-        "block": _any_list(block_keywords),
+        # 动态、视频各一套词（互不影响）
+        "dynamic_pass": _any_list(dynamic_pass_keywords),
+        "dynamic_block": _any_list(dynamic_block_keywords),
+        "video_pass": _any_list(video_pass_keywords),
+        "video_block": _any_list(video_block_keywords),
         "note": str(note or "").strip(),
+        # 这条规则管哪类内容（默认动态过滤、视频不过滤，和 games.py 口径一致）
+        "filter_dynamic": _as_bool(filter_dynamic, True),
+        "filter_video": _as_bool(filter_video, False),
     }
+
+
+#: 指纹带版本前缀：字段集一变（比如这次新增 video_* 两套词）旧指纹就整体作废 ——
+#: 否则老库里"没有新字段"会被当成"表被改过"，反过来把用户的 JSON 覆盖掉。
+_REV_PREFIX = "v2:"
 
 
 def _rev_of(canon: Dict[str, Any]) -> str:
     blob = json.dumps(canon, ensure_ascii=False, sort_keys=True)
-    return hashlib.md5(blob.encode("utf-8")).hexdigest()[:16]
+    return _REV_PREFIX + hashlib.md5(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _rev_is_current(rev: str) -> bool:
+    """这个指纹是不是本版写的（老版本的指纹没有前缀，一律当作"无历史"）。"""
+    return str(rev or "").startswith(_REV_PREFIX)
 
 
 def _file_canon(raw: Dict[str, Any], stem: str) -> Dict[str, Any]:
@@ -223,10 +279,20 @@ def _file_canon(raw: Dict[str, Any], stem: str) -> Dict[str, Any]:
         name=raw.get("name") or stem,
         mode=raw.get("mode"),
         uids=raw.get("uids") or {},
-        pass_keywords=raw.get("pass_keywords"),
-        # block_keywords 是正式名；早期版本叫 filter_keywords，兼容一下
-        block_keywords=raw.get("block_keywords", raw.get("filter_keywords")),
+        # 老名字兼容：pass_keywords / block_keywords 就是「动态」那套词，
+        # filter_keywords 是更早的名字（当年只有一套词）
+        dynamic_pass_keywords=raw.get(
+            "dynamic_pass_keywords", raw.get("pass_keywords")
+        ),
+        dynamic_block_keywords=raw.get(
+            "dynamic_block_keywords",
+            raw.get("block_keywords", raw.get("filter_keywords")),
+        ),
+        video_pass_keywords=raw.get("video_pass_keywords"),
+        video_block_keywords=raw.get("video_block_keywords"),
         note=raw.get("note"),
+        filter_dynamic=raw.get("filter_dynamic"),
+        filter_video=raw.get("filter_video"),
     )
 
 
@@ -235,9 +301,14 @@ def _row_canon(row: Any) -> Dict[str, Any]:
         name=getattr(row, "name", ""),
         mode=getattr(row, "mode", ""),
         uids=getattr(row, "uids", ""),
-        pass_keywords=getattr(row, "pass_keywords", ""),
-        block_keywords=getattr(row, "block_keywords", ""),
+        dynamic_pass_keywords=getattr(row, "dynamic_pass_keywords", ""),
+        dynamic_block_keywords=getattr(row, "dynamic_block_keywords", ""),
+        video_pass_keywords=getattr(row, "video_pass_keywords", ""),
+        video_block_keywords=getattr(row, "video_block_keywords", ""),
         note=getattr(row, "note", ""),
+        # 表里存的是 "1"/"0" 文本（_as_bool 认它）
+        filter_dynamic=getattr(row, "filter_dynamic", ""),
+        filter_video=getattr(row, "filter_video", ""),
     )
 
 
@@ -245,9 +316,12 @@ def _row_canon(row: Any) -> Dict[str, Any]:
 # 文件读写
 # ---------------------------------------------------------------------------
 _DEFAULT_NOTE = (
-    "一个游戏一个 JSON，文件名就是规则名（启停看配置项「启用的游戏规则」）。"
-    "uids 必填（{UID: 号的名字}，可多个）；mode=whitelist：命中 pass_keywords → 直接推，"
-    "其余过滤；mode=blacklist：默认全推，命中 block_keywords → 直接丢弃。"
+    "一个游戏一个 JSON，文件名就是规则名（启停看文件里的 enabled 字段）。"
+    "uids 必填（{UID: 号的名字}，可多个）；mode=whitelist：命中放行词 → 直接推，"
+    "其余过滤；mode=blacklist：默认全推，命中屏蔽词 → 直接丢弃。"
+    "动态、视频各一套词：dynamic_pass_keywords / dynamic_block_keywords（标题+正文）、"
+    "video_pass_keywords / video_block_keywords（只按标题）；"
+    "filter_dynamic / filter_video 决定这条规则管不管动态、投稿视频（默认只过滤动态）。"
     "本文件也可以在控制台「数据库管理 → 游戏过滤规则」里改，改完会自动写回这里。"
 )
 
@@ -277,11 +351,16 @@ def _write_file(stem: str, canon: Dict[str, Any], old_raw: Optional[Dict[str, An
     data: Dict[str, Any] = {
         "_说明": (old_raw or {}).get("_说明") or _DEFAULT_NOTE,
         "name": canon["name"],
-        "enabled": True,
+        # 保留文件里原本的启停状态（别把用户手写的 enabled: false 抹掉）
+        "enabled": (old_raw or {}).get("enabled", True),
         "mode": canon["mode"],
+        "filter_dynamic": bool(canon["filter_dynamic"]),
+        "filter_video": bool(canon["filter_video"]),
         "uids": {k: v for k, v in canon["uids"]},
-        "pass_keywords": list(canon["pass"]),
-        "block_keywords": list(canon["block"]),
+        "dynamic_pass_keywords": list(canon["dynamic_pass"]),
+        "dynamic_block_keywords": list(canon["dynamic_block"]),
+        "video_pass_keywords": list(canon["video_pass"]),
+        "video_block_keywords": list(canon["video_block"]),
         "note": canon["note"],
     }
     try:
@@ -296,7 +375,7 @@ def _write_file(stem: str, canon: Dict[str, Any], old_raw: Optional[Dict[str, An
 # 数据库
 # ---------------------------------------------------------------------------
 #: 后台自动同步间隔（秒）；命令里的 ``bili游戏规则 同步`` 用 force 绕过节流。
-SYNC_INTERVAL = 15.0
+SYNC_INTERVAL = 10.0
 _state: Dict[str, Any] = {
     "ready": False,
     "ready_at": 0.0,
@@ -321,31 +400,75 @@ def _session():
     return async_maker()
 
 
+async def _exec(sql: str) -> None:
+    """执行一条 SQL（建表 / 补列用）。
+
+    走核心自己给的 session，**不碰引擎在核心内部的私有名字** —— 老实现直接
+    ``from ...base_models import engine`` 再 ``conn.exec_driver_sql()``，这两步任一对不上
+    都会被下面那个 ``except`` 吞掉，结果就是"列没补上、还一声不吭"。
+    """
+    from sqlalchemy import text as sa_text
+
+    async with _session() as session:
+        await session.execute(sa_text(sql))
+        await session.commit()
+
+
+#: 这些报错属于"本来就该发生"：列已存在（新装）、老库没有老列可迁（新库）
+_BENIGN_SQL_ERRORS = (
+    "duplicate column",
+    "already exists",
+    "no such column",
+    "no such table",
+)
+
+
+def _benign(err: Exception) -> bool:
+    msg = str(err).lower()
+    return any(x in msg for x in _BENIGN_SQL_ERRORS)
+
+
 async def ensure_table() -> bool:
-    """确保 ``biligamerule`` 表存在，并给老库补新列（照着 models.ensure_table 抄的）。"""
+    """确保 ``biligamerule`` 表存在，并给老库补上新列（缺列就直接 ``no such column``）。
+
+    ⚠️ 控制台「数据库管理」是按**模型**直接 SELECT 的（``admin_api.get_table_data``），
+    它不关心这张表实际有哪些列 —— 所以列必须在这里补齐，否则一打开页面就报
+    ``no such column: biligamerule.xxx``。失败**不再静默**：真补不上会记日志 + 返回 False，
+    交给上层在冷却后重试。
+    """
     if not MODEL_READY:
         return False
-    try:
-        from gsuid_core.utils.database.base_models import engine
-    except Exception as e:
-        _state["last_error"] = f"拿不到核心数据库引擎：{e}"
-        _log(f"BiliSubscribe：{_state['last_error']}，游戏规则只读 JSON", "info")
-        return False
 
     try:
-        async with engine.begin() as conn:
-            await conn.run_sync(lambda c: BiliGameRule.__table__.create(c, checkfirst=True))
+        async with _session() as session:
+            conn = await session.connection()
+            await conn.run_sync(
+                lambda c: BiliGameRule.__table__.create(c, checkfirst=True)
+            )
+            await session.commit()
     except Exception as e:
-        _state["last_error"] = f"建表失败：{e}"
-        _log(f"BiliSubscribe：{_state['last_error']}，规则只读 JSON")
+        _state["last_error"] = f"建表失败：{type(e).__name__}: {e}"
+        _log(f"BiliSubscribe：{_state['last_error']}，游戏规则只读 JSON")
         return False
 
-    for sql in NEW_COLUMNS:
+    problems: List[str] = []
+    for sql in NEW_COLUMNS + MIGRATE_COLUMNS:
         try:
-            async with engine.begin() as conn:
-                await conn.exec_driver_sql(sql)
-        except Exception:
-            continue  # 列已存在（或这版数据库不吃这条语法）：跳过
+            await _exec(sql)
+        except Exception as e:
+            if _benign(e):
+                continue
+            problems.append(f"{type(e).__name__}: {e} ← {sql}")
+
+    if problems:
+        _state["last_error"] = "补列/迁移失败：" + "；".join(problems[:3])
+        _log(
+            f"BiliSubscribe：{_state['last_error']}"
+            "（控制台「数据库管理 → 游戏过滤规则」会因此报 no such column）"
+        )
+        return False
+
+    _state["last_error"] = ""
     return True
 
 
@@ -371,8 +494,12 @@ def _row_data(stem: str, canon: Dict[str, Any], rev: str) -> Dict[str, Any]:
         "name": canon["name"],
         "mode": canon["mode"],
         "uids": _rows_to_text(canon["uids"]),
-        "pass_keywords": _list_to_text(canon["pass"]),
-        "block_keywords": _list_to_text(canon["block"]),
+        "dynamic_pass_keywords": _list_to_text(canon["dynamic_pass"]),
+        "dynamic_block_keywords": _list_to_text(canon["dynamic_block"]),
+        "video_pass_keywords": _list_to_text(canon["video_pass"]),
+        "video_block_keywords": _list_to_text(canon["video_block"]),
+        "filter_dynamic": "1" if canon["filter_dynamic"] else "0",
+        "filter_video": "1" if canon["filter_video"] else "0",
         "note": canon["note"],
         "rev": rev,
     }
@@ -407,18 +534,21 @@ async def _sync_in_session(session: Any, files: Dict[str, Tuple[Dict[str, Any], 
         if rrev == frev:
             continue  # 指纹一致：两边都没动
         rcanon = _row_canon(row)
+        if rcanon == canon:
+            # 内容其实一样，只是指纹没跟上（老库刚补列 / 只动了空白）：对齐指纹即可
+            row.rev = frev
+            changed += 1
+            continue
         rrev_now = _rev_of(rcanon)
-        if rrev_now != rrev:
-            # 表侧改过（或两边都改了）：表赢，写回文件
+        if _rev_is_current(rrev) and rrev_now != rrev:
+            # 表有本版指纹、又和表的当前内容不符 → 表侧改过（或两边都改了）：表赢，写回文件
             _write_file(stem, rcanon, raw)
             for key, value in _row_data(stem, rcanon, rrev_now).items():
                 setattr(row, key, value)
-        elif frev != rrev:
-            # 只有文件改了：写进表
+        else:
+            # 没有本版指纹（老版本写的 / 刚补列）或表没动过：以文件为准，写进表
             for key, value in _row_data(stem, canon, frev).items():
                 setattr(row, key, value)
-        else:
-            row.rev = rrev_now  # 内容其实一样，只是指纹没跟上：对齐即可
         changed += 1
 
     # ② 表里有、文件没了 = 规则被删了（"删掉就是删掉"）
@@ -481,7 +611,7 @@ async def sync(force: bool = False) -> bool:
 
 
 async def _sync_loop() -> None:
-    """后台循环：每 ``SYNC_INTERVAL`` 秒同步一轮（控制台改完 ~15 秒内落到文件）。"""
+    """后台循环：每 ``SYNC_INTERVAL`` 秒同步一轮（控制台改完 ~10 秒内落到文件）。"""
     while True:
         try:
             await asyncio.sleep(SYNC_INTERVAL)

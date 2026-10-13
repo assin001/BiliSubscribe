@@ -1,12 +1,14 @@
 {
-  "_说明": "白名单口径（mode 默认就是 whitelist，可省）：只推命中 pass_keywords 的动态，其余过滤/进待定。uids 必填（{UID: 号的名字}，可多个）；block_keywords 命中 → 直接丢弃（不推、不通知、连待定都不进），优先于 pass_keywords。加词不用重启，插件每 5 秒自动重读。",
+  "_说明": "白名单口径（mode 默认就是 whitelist，可省）：动态只推命中 dynamic_pass_keywords 的，其余过滤/进待定；视频（filter_video 打开后）只按标题匹配 video_pass_keywords / video_block_keywords。uids 必填（{UID: 号的名字}，可多个）。dynamic_block_keywords 命中 → 直接丢弃（不推、不通知、连待定都不进），优先于放行词。加词不用重启，插件每 5 秒自动重读。",
   "name": "异环",
   "enabled": true,
   "mode": "whitelist",
+  "filter_dynamic": true,
+  "filter_video": false,
   "uids": {
     "3546636978489848": "异环"
   },
-  "pass_keywords": [
+  "dynamic_pass_keywords": [
     "活动日历",
     "角色档案",
     "前瞻回顾",
@@ -19,6 +21,8 @@
     "礼遇",
     "时装"
   ],
-  "block_keywords": [],
+  "dynamic_block_keywords": [],
+  "video_pass_keywords": [],
+  "video_block_keywords": [],
   "note": "公告与资讯都发在官方号动态里，图文、专栏、多图混排"
 }

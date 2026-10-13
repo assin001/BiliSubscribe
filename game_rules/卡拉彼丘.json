@@ -1,14 +1,18 @@
 {
-  "_说明": "黑名单口径：默认全推，只把命中 block_keywords 的动态丢掉（不推群、不通知、连待定队列都不进）。为什么用黑名单：这个号的标题看不出类型，得看正文，而正文措辞又不固定，列白名单永远列不全。block_keywords 取「一句话里最稳定的那几个字」，写在标题或正文里都认；加词不用重启，插件每 5 秒自动重读。",
+  "_说明": "黑名单口径：默认全推，只把命中 dynamic_block_keywords 的动态丢掉（不推群、不通知、连待定队列都不进）；视频（filter_video 打开后）同理，只按标题匹配 video_block_keywords。为什么用黑名单：这个号的标题看不出类型，得看正文，而正文措辞又不固定，列白名单永远列不全。屏蔽词取「一句话里最稳定的那几个字」，写在标题或正文里都认；加词不用重启，插件每 5 秒自动重读。",
   "name": "卡拉彼丘",
   "enabled": true,
   "mode": "blacklist",
+  "filter_dynamic": true,
+  "filter_video": false,
   "uids": {
     "660091334": "卡拉彼丘"
   },
-  "pass_keywords": [],
-  "block_keywords": [
+  "dynamic_pass_keywords": [],
+  "video_pass_keywords": [],
+  "dynamic_block_keywords": [
     "安全巡查公告"
   ],
+  "video_block_keywords": [],
   "note": "第三人称射击游戏官方号（103 万粉）。日常公告（安全巡查等）屏蔽，其余照常推"
 }

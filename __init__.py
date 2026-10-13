@@ -93,6 +93,11 @@ except Exception as _e:  # pragma: no cover
 sv_bili = SV("B站订阅")
 sv_bili_admin = SV("B站订阅管理", pm=1)
 
+# 插件一加载就尽量补一次规则表结构：控制台「数据库管理」是**按模型直接 SELECT** 的，
+# 补列要是一直等到第一次轮询（可能好几分钟）才做，这期间打开那个页面就会报
+# no such column。没有事件循环时 ensure_loop 会静默跳过，靠轮询里的 sync_now() 兜底。
+game_rules_db.ensure_loop()
+
 HELP = """【B站订阅】
 订阅 UP 主后，一有新的视频投稿或动态更新就推送到本群。
 
@@ -792,15 +797,21 @@ async def _cmd_check_now(bot: Bot, ev: Event):
 # 命令：动态过滤（官方号白名单）与待定队列
 # ---------------------------------------------------------------------------
 def _decide_how(preset: Optional[games.GamePreset], kind: str, parsed: Dict) -> str:
-    """这条动态怎么处理：视频永远直接推，其它交给所在游戏的规则判断。
+    """这条内容怎么处理：视频 / 动态**各看规则文件里的开关**，开的那一类才走游戏规则。
 
     规则是**外挂 JSON**（插件目录的 ``game_rules/``，每个游戏一个文件：官方号 +
     口径 + 放行栏目 + 屏蔽关键词），所以**订阅了官方号就自动按该游戏的口径过滤**，
     不需要管理员手动维护名单。
+
+    - ``kind == "video"``：看规则里的 ``filter_video``（默认 false → 直接推）；
+    - ``kind == "live"``：直播不受游戏规则影响，永远直接推；
+    - 其它（图文 / 专栏 / 转发等动态）：看规则里的 ``filter_dynamic``（默认 true）。
     """
-    if kind == "video" or preset is None:
+    if preset is None:
         return games.PUSH
-    return preset.decide(parsed, tuple(cfg.get_list("auto_push_keywords")))
+    if not preset.filters(kind):
+        return games.PUSH
+    return preset.decide(parsed, tuple(cfg.get_list("auto_push_keywords")), kind)
 
 
 def _short_desc(parsed: Dict) -> str:
@@ -1052,6 +1063,9 @@ async def _cmd_filter_check(bot: Bot, ev: Event):
     preset = games.find_by_uid(uid)
     images = [u for u in (parsed.get("images") or []) if str(u or "").strip()]
     animated = [u for u in images if is_animated_url(u)]
+    kind = str(parsed.get("kind") or "other")
+    # 这条受不受游戏规则管：先看它属于哪一类，再看规则文件里的对应开关
+    scope_on = bool(preset is not None and preset.filters(kind))
     lines = [
         "【B站订阅·过滤自检】",
         f"作者：{parsed.get('uname') or '未知UP'}" + (f"（{uid}）" if uid else ""),
@@ -1060,18 +1074,28 @@ async def _cmd_filter_check(bot: Bot, ev: Event):
         f"正文：{_short_desc(parsed)}",
         f"图片：{len(images)} 张（动图 {len(animated)} 张）",
     ]
+    if preset is not None:
+        lines.append(f"过滤范围：{games.scope_text(preset)}")
     if preset is None:
         lines.append("规则：这个 UP 不在任何启用中的游戏规则里 → 不受过滤")
         lines.append("判定：✅ 会直接推送")
+    elif not scope_on:
+        lines.append(f"规则：《{preset.name}》［{preset.mode_text}］")
+        lines.append("判定：✅ 会直接推送（这类内容没开游戏规则过滤）")
     else:
-        hit_block = preset.match_block(parsed)
-        hit = preset.match_keyword(parsed, tuple(cfg.get_list("auto_push_keywords")))
+        hit_block = preset.match_block(parsed, kind)
+        hit = preset.match_keyword(
+            parsed, tuple(cfg.get_list("auto_push_keywords")), kind
+        )
         rule_file = preset.source or preset.name + ".json"
+        pass_kw, block_kw = preset.keywords_for(kind)
+        kw_label = "视频（只按标题）" if kind == "video" else "动态（标题 + 正文）"
         lines.append(f"规则：《{preset.name}》［{preset.mode_text}］→ {rule_file}")
-        if preset.pass_keywords:
-            lines.append(f"　放行栏目：{'、'.join(preset.pass_keywords)}")
-        if preset.block_keywords:
-            lines.append(f"　屏蔽关键词：{'、'.join(preset.block_keywords)}")
+        lines.append(f"词表：{kw_label}")
+        if pass_kw:
+            lines.append(f"　放行：{'、'.join(pass_kw)}")
+        if block_kw:
+            lines.append(f"　屏蔽：{'、'.join(block_kw)}")
         if hit_block:
             lines.append(f"命中「屏蔽」：{hit_block}")
             lines.append("判定：❌ 会被丢弃（连待定队列都不进）")
@@ -1102,7 +1126,9 @@ def _rules_text() -> str:
         f"规则目录：{games.rules_dir()}\n"
         "（一个游戏一个 JSON，文件名就是规则名；改完不用重启。"
         "新增游戏加个文件，游戏没了直接删文件）\n"
-        f"启用中的规则：{enabled} 条（控制台「启用的游戏规则」里增删）\n"
+        f"启用中的规则：{enabled} 条（新加的 JSON 会自动进「启用的游戏规则」；"
+        "停用请用 bili游戏规则 停用 <规则名>）\n"
+        "过滤范围（视频 / 动态）写在每个规则文件里：filter_dynamic、filter_video\n"
         "规则内容也可以直接改 JSON，或在控制台「数据库管理 → 游戏过滤规则」里改\n\n"
         + "\n".join(games.summary_lines())
         + "\n白名单口径的规则：「其余」动态"
@@ -1192,18 +1218,15 @@ async def _cmd_game_rules(bot: Bot, ev: Event):
         await reply(bot, ev, f"找不到规则「{target}」\n目录里的规则：{names}")
         return
 
-    # 规则名 = JSON 文件名（不带扩展名）：配置项「启用的游戏规则」就是按它来认的
+    # 规则名 = JSON 文件名（不带扩展名）
     rule_name = preset.source[:-5] if preset.source.lower().endswith(".json") else preset.source
     rule_name = rule_name or preset.name
     turn_off = action in ("停用", "disable", "关")
 
-    enabled = list(cfg.get_list("game_rules_enabled"))
-    if turn_off:
-        enabled = [x for x in enabled if x not in (rule_name, preset.name)]
-    elif rule_name not in enabled:
-        enabled.append(rule_name)
-    if not cfg.set_value("game_rules_enabled", enabled):
-        await reply(bot, ev, "写入配置失败：请到 Web 控制台改「启用的游戏规则」")
+    # 写进**规则文件**的 enabled 字段（顺带同步配置名单）：光改名单的话，
+    # 下次启动会被"新规则自动补齐"再补回来，停用等于没停
+    if not games.set_enabled(rule_name, not turn_off):
+        await reply(bot, ev, f"写入规则文件失败：{rule_name}.json（看看文件是不是只读）")
         return
 
     games.reload()
@@ -1211,12 +1234,13 @@ async def _cmd_game_rules(bot: Bot, ev: Event):
     await reply(
         bot,
         ev,
-        f"已{'停用' if turn_off else '启用'}《{preset.name}》（规则 {rule_name}）\n"
+        f"已{'停用' if turn_off else '启用'}《{preset.name}》"
+        f"（{rule_name}.json 的 enabled = {'false' if turn_off else 'true'}）\n"
         + (
             "停用后这个官方号的动态不再走规则过滤，和普通 UP 一样照单全推"
             if turn_off
             else f"启用后按{preset.mode_text}口径过滤：" + (
-                "默认全推，命中屏蔽词才不推" if preset.is_blacklist else "命中放行栏目才推群"
+                "默认全推，命中屏蔽词才不推" if preset.is_blacklist else "命中放行词才推群"
             )
         )
         + "\n\n"
@@ -1610,8 +1634,9 @@ async def _check_one(uid: str, info: Dict) -> Optional[Dict]:
                             )
                             enabled = False
                     # enabled 为假表示这类动态整体关了（或判成广告），游标照走。
-                    # 注意 FILTER / PENDING 只会出现在有游戏预设（官方号）的分支里，
-                    # 普通 UP 一律 PUSH，所以下面两个分支里 preset 一定不是 None。
+                    # 注意 FILTER / PENDING 只会出现在"有游戏预设（官方号）且对应开关
+                    # （动态 / 视频）开着"的分支里，普通 UP 一律 PUSH，所以下面两个
+                    # 分支里 preset 一定不是 None。
                     decision = _decide_how(preset, kind, p) if enabled else None
                     if decision == games.FILTER:
                         # FILTER 只有一个来源：命中了 block_keywords（两种口径都一样）
@@ -1619,7 +1644,7 @@ async def _check_one(uid: str, info: Dict) -> Optional[Dict]:
                         logger.info(
                             f"B站订阅：{name or uid} 的动态 {p.get('id_str')} "
                             f"命中《{preset.name}》的屏蔽关键词"
-                            f"（{preset.match_block(p) or ''}），这条不推"
+                            f"（{preset.match_block(p, kind) or ''}），这条不推"
                         )
                     elif decision == games.PENDING:
                         if cfg.get("queue_unmatched"):
@@ -1629,7 +1654,7 @@ async def _check_one(uid: str, info: Dict) -> Optional[Dict]:
                             await pending.notify_pending(item)
                             logger.info(
                                 f"B站订阅：{name or uid} 的动态 {p.get('id_str')} 没命中"
-                                f"《{preset.name}》的放行栏目，进待定队列 #{item.get('seq')}"
+                                f"《{preset.name}》的放行词，进待定队列 #{item.get('seq')}"
                             )
                         else:
                             runtime.STATE["filtered"] = (
@@ -1637,7 +1662,7 @@ async def _check_one(uid: str, info: Dict) -> Optional[Dict]:
                             )
                             logger.info(
                                 f"B站订阅：{name or uid} 的动态 {p.get('id_str')} 没命中"
-                                f"《{preset.name}》的放行栏目，已过滤（不推群）"
+                                f"《{preset.name}》的放行词，已过滤（不推群）"
                             )
                     elif decision == games.PUSH and targets:
                         # 卡片（头部+标题+正文+首图）+ 其余图单独补发 + 长文合并转发
@@ -1679,14 +1704,32 @@ async def _check_one(uid: str, info: Dict) -> Optional[Dict]:
                     if not bvid or bvid in pushed:
                         continue
                     if video_targets:
-                        msgs, _ = await build_video_msgs(v, name)
-                        await push_to_groups(
-                            video_targets,
-                            msgs,
-                            fallback_text=format_video(v, name)["text"],
-                            kind="video",
-                        )
-                        logger.info(f"B站订阅：推送 {name or uid} 的视频 {bvid}")
+                        # 视频也过一遍游戏规则：只有规则文件里 filter_video=true（且是官方号）才真过滤，
+                        # 否则 _decide_how 返回 PUSH。视频**不进待定队列** —— 白名单没命中就按
+                        # 过滤处理（待定队列的回推只认动态结构，塞进去会推不出去）
+                        decision = _decide_how(preset, "video", v)
+                        if decision == games.PUSH:
+                            msgs, _ = await build_video_msgs(v, name)
+                            await push_to_groups(
+                                video_targets,
+                                msgs,
+                                fallback_text=format_video(v, name)["text"],
+                                kind="video",
+                            )
+                            logger.info(f"B站订阅：推送 {name or uid} 的视频 {bvid}")
+                        else:
+                            runtime.STATE["filtered"] = (
+                                int(runtime.STATE.get("filtered") or 0) + 1
+                            )
+                            why = (
+                                f"命中《{preset.name}》的屏蔽关键词"
+                                f"（{preset.match_block(v, 'video') or ''}）"
+                                if decision == games.FILTER
+                                else f"没命中《{preset.name}》的放行词"
+                            )
+                            logger.info(
+                                f"B站订阅：{name or uid} 的视频 {bvid} {why}，这条不推"
+                            )
                     storage.remember_av(info, bvid)
                     pushed.append(bvid)
                 update["pushed_av"] = list(info.get("pushed_av") or [])
