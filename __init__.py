@@ -133,6 +133,7 @@ bili检查更新                      立刻跑一轮更新检查
 
 手动推送：
 bili推这条 <链接|ID|cv号|BV号|短链> [订阅群] 手动补推一条动态或视频（默认推到本会话）
+bili测试订阅 <链接|ID|cv号|短链>   用订阅那套流程推一条动态到本群（走过滤规则，不看订阅）
 bili测试全文 <动态链接|ID|cv号|短链>   调试：看长文正文能抓到多少
 
 动态过滤（游戏规则）：每套规则自己选口径——白名单=命中栏目才推、黑名单=默认全推只挡屏蔽词
@@ -819,6 +820,90 @@ def _short_desc(parsed: Dict) -> str:
     return text if len(text) <= 30 else text[:30] + "…"
 
 
+async def _deliver_dynamic(
+    uid: str,
+    name: str,
+    p: Dict,
+    preset: Optional[games.GamePreset],
+    targets: Dict[str, Dict],
+    ad_filter: bool,
+    deliver: "Optional[Callable]" = None,
+) -> "tuple[str, int]":
+    """按「订阅推送」的口径处理一条动态，返回 ``(结果, 成功推送群数)``。
+
+    订阅轮询（``_check_one``）和 ``bili测试订阅`` 共用这一份逻辑，手动复现和线上
+    完全一致。``deliver``：推到"当前会话"时由调用方指定发送方式（``bili测试订阅``
+    传 ``_send_dynamic_to_session``，走 ``reply``；不传就走订阅群的主动推送）。
+    结果取值：
+
+    - ``push``：通过，已推给 ``targets``（成功群数见第二个返回值）；
+    - ``filter``：被过滤（判成广告，或命中游戏规则的屏蔽词 / 白名单没命中且没开待定）；
+    - ``pending``：白名单没命中但开着待定队列，已入队并通知拍板会话；
+    - ``skip``：这类内容没有群要（或判成广告），只走游标不推。
+    """
+    kind = str(p.get("kind") or "other")
+    enabled = bool(targets)
+    # 非官方号先过一遍带货/广告规则；判为广告就整条不推（游标照走）
+    if enabled and ad_filter and preset is None:
+        why = adfilter.looks_like_ad(p)
+        if why:
+            runtime.STATE["filtered"] = int(runtime.STATE.get("filtered") or 0) + 1
+            logger.info(
+                f"B站订阅：{name or uid} 的动态 {p.get('id_str')} "
+                f"判定为带货/广告（{why}），这条不推"
+            )
+            return "skip", 0
+    # enabled 为假表示这类动态整体关了（或判成广告），游标照走。
+    # 注意 FILTER / PENDING 只会出现在"有游戏预设（官方号）且对应开关（动态 / 视频）
+    # 开着"的分支里，普通 UP 一律 PUSH，所以下面两个分支里 preset 一定不是 None。
+    decision = _decide_how(preset, kind, p) if enabled else None
+    if decision == games.FILTER:
+        # FILTER 只有一个来源：命中了 block_keywords（两种口径都一样）
+        runtime.STATE["filtered"] = int(runtime.STATE.get("filtered") or 0) + 1
+        logger.info(
+            f"B站订阅：{name or uid} 的动态 {p.get('id_str')} "
+            f"命中《{preset.name}》的屏蔽关键词"
+            f"（{preset.match_block(p, kind) or ''}），这条不推"
+        )
+        return "filter", 0
+    if decision == games.PENDING:
+        if cfg.get("queue_unmatched"):
+            # 待定队列也要带全文，否则捞回来时还得再抓一次
+            await fulltext.nodes_for(p)
+            item = await pending.enqueue(uid, name, p, game=preset.name)
+            await pending.notify_pending(item)
+            logger.info(
+                f"B站订阅：{name or uid} 的动态 {p.get('id_str')} 没命中"
+                f"《{preset.name}》的放行词，进待定队列 #{item.get('seq')}"
+            )
+            return "pending", 0
+        runtime.STATE["filtered"] = int(runtime.STATE.get("filtered") or 0) + 1
+        logger.info(
+            f"B站订阅：{name or uid} 的动态 {p.get('id_str')} 没命中"
+            f"《{preset.name}》的放行词，已过滤（不推群）"
+        )
+        return "filter", 0
+    if decision == games.PUSH and targets:
+        # 取数与推送都走 bili推这条 那一套：拿到动态 id 后用详情接口把这条「取全」
+        # （详情接口 → opus 页面 → 手里这份 feed 兜底，再补标题/正文/配图），
+        # 再拼卡片推给订阅群 —— 和手动补推共用 _push_dynamic_groups 这一份实现。
+        full = await _fetch_dynamic_full(
+            _ids_from_parsed(p), str(p.get("id_str") or ""), fallback_parsed=p
+        )
+        if deliver is not None:
+            # 推到"当前会话"（bili测试订阅）：由调用方给发送方式，走 reply
+            sent = await deliver(full)
+        else:
+            sent = await _push_dynamic_groups(
+                full, name, targets, kind=kind if kind in ("video", "live") else "dynamic"
+            )
+        logger.info(
+            f"B站订阅：推送 {name or uid} 的动态 {full.get('id_str') or p.get('id_str')}"
+        )
+        return "push", sent
+    return "skip", 0
+
+
 async def _resolve_seq(arg: str):
     """把命令参数解析成待定编号；返回 ``(seq, 提示文案)``，解析不了时 seq 为 None。"""
     items = await pending.pending_items()
@@ -1319,6 +1404,136 @@ async def _parse_dynamic_arg(arg: str) -> Dict:
     return out
 
 
+def _ids_from_parsed(parsed: Dict) -> Dict:
+    """从解析好的动态里还原出 ``_parse_dynamic_arg`` 那种 ids。
+
+    订阅轮询是按 UID 拉 feed 拿到动态的（没有"用户输入的链接"可拆），推之前要按
+    ``bili推这条`` 的流程再取全一次，就得把 id 还原成同样结构。
+    """
+    return {
+        "id_str": str(parsed.get("id_str") or parsed.get("opus_id") or ""),
+        "cv_id": str(parsed.get("cv_id") or ""),
+        "opus_id": str(parsed.get("opus_id") or parsed.get("id_str") or ""),
+        "bvid": str(parsed.get("bvid") or ""),
+        "aid": "",
+    }
+
+
+async def _fetch_dynamic_full(
+    ids: Dict, arg: str, fallback_parsed: Optional[Dict] = None
+) -> Dict:
+    """按 ``bili推这条`` 的流程把一条动态「取全」：详情接口 → opus 页面 → 文章兜底。
+
+    取到之后 ``fulltext.fill(force=True)`` 补标题/作者/正文/配图。手动 ``bili推这条``
+    和订阅轮询的推送共用这一段，保证两条链路推出来一模一样。
+
+    ``fallback_parsed``：全都取不到时拿它代替空壳「文章」形态 —— 订阅那边手里已经有
+    feed 数据，比空壳好；传 None 才退化成文章形态（只给了 cv 号的场景）。
+    """
+    parsed: Optional[Dict] = None
+    # ① 动态详情（opus id 就是动态 id，两种链接都走这里）
+    for did in (ids["id_str"], ids["opus_id"]):
+        if not did:
+            continue
+        item = await api.get_detail_item(did)
+        if item:
+            parsed = extract_dynamic(item)
+            break
+
+    # ② 详情接口拿不到（最常见是被 -352 风控）：改从 opus 页面解析。
+    # 页面是服务端渲染、正文直出，比接口稳得多，标题/作者/正文/图片都能拿到
+    if not parsed:
+        for oid in (ids["opus_id"], ids["id_str"]):
+            if not oid:
+                continue
+            parsed = await fulltext.parse_opus_page(oid)
+            if parsed:
+                logger.info(f"B站订阅：动态详情没取到，改从 opus 页面解析 {arg}")
+                break
+
+    # ③ 还是不行（比如只给了 cv 号）：退化成"文章"形态，正文交给 fulltext 抓
+    if not parsed:
+        if fallback_parsed is not None:
+            parsed = fallback_parsed
+        else:
+            fallback_url = (
+                f"https://www.bilibili.com/read/cv{ids['cv_id']}"
+                if ids["cv_id"]
+                else f"https://www.bilibili.com/opus/{ids['opus_id']}" if ids["opus_id"] else arg
+            )
+            parsed = {
+                "id_str": ids["id_str"],
+                "kind": "article",
+                "uname": "",
+                "mid": "",
+                "action": "投稿了文章",
+                "title": "",
+                "text": "",
+                "images": [],
+                "url": fallback_url,
+                "pub_ts": 0,
+                "bvid": "",
+                "cv_id": ids["cv_id"],
+                "opus_id": ids["opus_id"],
+            }
+            logger.info(f"B站订阅：动态详情没取到 {arg}，改用文章形态抓正文")
+    elif ids["cv_id"] and not parsed.get("cv_id"):
+        parsed["cv_id"] = ids["cv_id"]
+
+    # 先抓正文（fetch 会顺手把标题/作者/正文回填到 parsed），**再**拼卡片：
+    # 卡片是拿 parsed 现画的，顺序反了就是"未知UP · 投稿了文章"那种空壳。
+    # 手动补推等于调试，强制重抓一次，不看 short 门槛。
+    await fulltext.fill(parsed, force=True)
+    if not str(parsed.get("text") or "").strip():
+        head = "\n".join(
+            str(seg.get("text") or "")
+            for seg in (parsed.get("full_parts") or [])
+            if seg.get("type") == "text"
+        )
+        if head.strip():
+            parsed["text"] = " ".join(head.split())[:200]
+    if not str(parsed.get("text") or "").strip() and not parsed.get("title"):
+        # 什么都抓不到时别发一张空白卡：给一句实话，链接在卡片下面单独发
+        parsed["text"] = "（没能取到正文，点下面的链接看原文）"
+    return parsed
+
+
+async def _push_dynamic_groups(
+    parsed: Dict, name: str, groups: Dict[str, Dict], kind: str = "dynamic"
+) -> int:
+    """把一条**已经取全**的动态拼成卡片推给这些群，返回成功群数。
+
+    订阅轮询的推送与 ``bili推这条`` 到订阅群都走它 —— 这是**唯一一份**实现，
+    以前两条链路各写一遍 ``build_dynamic_msgs`` + ``push_to_groups``。
+    （其余图/长文由 ``push_to_groups`` 内部 ``forward_batches`` 另起一帧补发。）
+    """
+    up = str(name or parsed.get("uname") or "")
+    msgs, forward = await build_dynamic_msgs(parsed, up)
+    return await push_to_groups(
+        groups,
+        msgs,
+        forward,
+        fallback_text=format_dynamic(parsed, up)["text"],
+        kind=kind,
+    )
+
+
+async def _send_dynamic_to_session(bot: Bot, ev: Event, parsed: Dict, name: str) -> int:
+    """把一条**已经取全**的动态发到当前会话：卡片先发，其余图/长文各另起一帧。
+
+    ``bili推这条``（不带「订阅群」）和 ``bili测试订阅`` 共用这一份 —— "发到本会话"
+    只有这一条链路。走 ``reply``（bot 直接发，核心按真实 bot_id 查得到配置），
+    不走 ``target_send`` 那套主动推送，免得同一个群里两条命令表现不一样。
+    """
+    up = str(name or parsed.get("uname") or "")
+    msgs, forward = await build_dynamic_msgs(parsed, up)
+    await reply(bot, ev, msgs)
+    for batch in forward_batches(forward):
+        await asyncio.sleep(1.0)
+        await reply(bot, ev, batch)
+    return 1
+
+
 @sv_bili_admin.on_command(("bili测试全文", "bili全文"), block=True)
 async def _cmd_test_fulltext(bot: Bot, ev: Event):
     """调试：给一个动态链接 / 动态ID / cv号，看全文能抓到多少。"""
@@ -1449,69 +1664,10 @@ async def _cmd_push_one(bot: Bot, ev: Event):
         logger.info(f"B站订阅：手动补推视频 {video.get('bvid') or arg} 到本会话")
         return
 
-    # ① 先按动态详情取（opus id 就是动态 id，两种链接都走这里）
-    parsed: Optional[Dict] = None
-    for did in (ids["id_str"], ids["opus_id"]):
-        if not did:
-            continue
-        item = await api.get_detail_item(did)
-        if item:
-            parsed = extract_dynamic(item)
-            break
-
-    # ② 详情接口拿不到（最常见是被 -352 风控）：改从 opus 页面解析。
-    # 页面是服务端渲染、正文直出，比接口稳得多，标题/作者/正文/图片都能拿到
-    if not parsed:
-        for oid in (ids["opus_id"], ids["id_str"]):
-            if not oid:
-                continue
-            parsed = await fulltext.parse_opus_page(oid)
-            if parsed:
-                logger.info(f"B站订阅：动态详情没取到，改从 opus 页面解析 {arg}")
-                break
-
-    # ③ 还是不行（比如只给了 cv 号）：退化成"文章"形态，正文交给 fulltext 抓
-    if not parsed:
-        fallback_url = (
-            f"https://www.bilibili.com/read/cv{ids['cv_id']}"
-            if ids["cv_id"]
-            else f"https://www.bilibili.com/opus/{ids['opus_id']}" if ids["opus_id"] else arg
-        )
-        parsed = {
-            "id_str": ids["id_str"],
-            "kind": "article",
-            "uname": "",
-            "mid": "",
-            "action": "投稿了文章",
-            "title": "",
-            "text": "",
-            "images": [],
-            "url": fallback_url,
-            "pub_ts": 0,
-            "bvid": "",
-            "cv_id": ids["cv_id"],
-            "opus_id": ids["opus_id"],
-        }
-        logger.info(f"B站订阅：动态详情没取到 {arg}，改用文章形态抓正文")
-    elif ids["cv_id"] and not parsed.get("cv_id"):
-        parsed["cv_id"] = ids["cv_id"]
-
+    # 取全这条动态：详情接口 → opus 页面 → 文章兜底，再补正文/配图
+    # （和订阅轮询的推送共用 _fetch_dynamic_full）
+    parsed = await _fetch_dynamic_full(ids, arg)
     name = str(parsed.get("uname") or "")
-    # 先抓正文（fetch 会顺手把标题/作者/正文回填到 parsed），**再**拼卡片：
-    # 卡片是拿 parsed 现画的，顺序反了就是"未知UP · 投稿了文章"那种空壳。
-    # 手动补推等于调试，强制重抓一次，不看 short 门槛。
-    await fulltext.fill(parsed, force=True)
-    if not str(parsed.get("text") or "").strip():
-        head = "\n".join(
-            str(p.get("text") or "")
-            for p in (parsed.get("full_parts") or [])
-            if p.get("type") == "text"
-        )
-        if head.strip():
-            parsed["text"] = " ".join(head.split())[:200]
-    if not str(parsed.get("text") or "").strip() and not parsed.get("title"):
-        # 什么都抓不到时别发一张空白卡：给一句实话，链接在卡片下面单独发
-        parsed["text"] = "（没能取到正文，点下面的链接看原文）"
 
     # 推到订阅群
     if to_subs:
@@ -1526,21 +1682,126 @@ async def _cmd_push_one(bot: Bot, ev: Event):
                 "去掉「订阅群」可以推到本会话",
             )
             return
-        msgs, forward = await build_dynamic_msgs(parsed, name)
-        sent = await push_to_groups(
-            groups, msgs, forward, fallback_text=format_dynamic(parsed, name)["text"]
-        )
+        sent = await _push_dynamic_groups(parsed, name, groups)
         logger.info(f"B站订阅：手动补推 {parsed.get('id_str') or arg} 到 {sent}/{len(groups)} 个订阅群")
         await reply(bot, ev, f"已推送到 {sent}/{len(groups)} 个订阅群")
         return
 
-    # 推到本会话：卡片 + 其余图先发，长文全文**另起一帧**（混在同一帧里 node 会跑到前面）
-    msgs, forward = await build_dynamic_msgs(parsed, name)
-    await reply(bot, ev, msgs)
-    for batch in forward_batches(forward):
-        await asyncio.sleep(1.0)
-        await reply(bot, ev, batch)
+    # 推到本会话：和 bili测试订阅 共用 _send_dynamic_to_session（唯一一条"发本会话"链路）
+    await _send_dynamic_to_session(bot, ev, parsed, name)
     logger.info(f"B站订阅：手动补推 {parsed.get('id_str') or arg} 到本会话")
+
+
+@sv_bili_admin.on_command(("bili测试订阅",), block=True)
+async def _cmd_test_subscribe(bot: Bot, ev: Event):
+    """用**订阅那套流程**推一条动态：取数、判定、推送都跟轮询一致。
+
+    **哪个群测就推哪个群**，不看这个群有没有订阅过该 UP —— 没订过的群也能拿它
+    复现"订了却没推 / 推出来不对"。和 ``bili推这条`` 的区别：这里先按订阅轮询用的
+    **空间动态接口**（``get_dynamic``）取这条、按 ``extract_dynamic`` 解析，再原样过
+    一遍订阅的判定（带货/广告、游戏规则白名单/黑名单、待定队列）；判定通过后，
+    取数与发送和 ``bili推这条`` 完全一样（同样的 ``_fetch_dynamic_full`` + 拼卡片）。
+    """
+    gid = str(ev.group_id or "")
+    if not gid:
+        await reply(bot, ev, "请在群聊里使用（测试订阅会把动态推到当前会话）")
+        return
+    arg = _args(ev).strip()
+    if not arg:
+        await reply(
+            bot,
+            ev,
+            "用法：bili测试订阅 <动态链接|动态ID|opus链接|cv号|b23.tv短链>\n"
+            "按订阅的方式（空间动态接口 + 过滤规则）处理这条动态，推给本群",
+        )
+        return
+
+    ids = await _parse_dynamic_arg(arg)
+    if not any(ids.values()):
+        await reply(
+            bot,
+            ev,
+            "认不出参数，请给动态链接、动态ID、opus 链接、cv 号或 b23.tv 短链",
+        )
+        return
+
+    # ① 先用详情接口拿一次，只为确定作者 UID —— 订阅是按 UID 拉空间动态的
+    detail: Optional[Dict] = None
+    for did in (ids["id_str"], ids["opus_id"]):
+        if not did:
+            continue
+        item = await api.get_detail_item(did)
+        if item:
+            detail = extract_dynamic(item)
+            break
+    if not detail:
+        await reply(
+            bot,
+            ev,
+            "没取到这条动态：可能被风控（bili设置ck 配 Cookie）、链接/ID 不对，或已删",
+        )
+        return
+
+    uid = str(detail.get("mid") or "")
+    name = str(detail.get("uname") or "")
+    if not uid:
+        await reply(bot, ev, "这条动态没给作者 UID，没法按订阅的方式处理，换个链接或稍后再试")
+        return
+
+    # ② 用订阅轮询同一个接口拉一次，把这条挑出来 —— 解析口径和线上完全一致
+    parsed = detail
+    source = "详情接口"
+    items = await api.get_dynamic(uid, 12)
+    if items:
+        for it in items:
+            p = extract_dynamic(it)
+            if str(p.get("id_str") or "") and str(p["id_str"]) == str(detail.get("id_str") or ""):
+                parsed, source = p, "空间动态接口（订阅轮询用的那个）"
+                break
+        else:
+            source = "详情接口（这条不在该 UP 最新一页动态里）"
+    elif items is None:
+        source = "详情接口（空间动态接口没拉到，可能被风控）"
+
+    if not name:
+        name = str(parsed.get("uname") or "")
+    preset = games.find_by_uid(uid)
+
+    # ③ 推到**本群**（哪个群测推哪个群），不看这个群订没订过该 UP。
+    # 发送方式和 bili推这条（不带「订阅群」）**完全一样**：走 reply 发本会话，
+    # 不走 target_send 的主动推送 —— 主动推送用的是 active_bot 里的 bot，
+    # 核心查配置时按那个 id 会查不到、退回默认参数，两条命令看起来就不一样了。
+    async def _deliver_here(item: Dict) -> int:
+        return await _send_dynamic_to_session(bot, ev, item, name)
+
+    result, sent = await _deliver_dynamic(
+        uid,
+        name,
+        parsed,
+        preset,
+        {gid: {}},
+        bool(cfg.get("ad_filter", True)),
+        deliver=_deliver_here,
+    )
+    verdict = {
+        "push": "✅ 已按订阅的方式推送到本群" if sent else "⚠️ 判定要推，但发送失败（看日志）",
+        "filter": "❌ 会被过滤掉，没有推送（原因看 bili过滤测试）",
+        "pending": "⏳ 进了待定队列，等人工拍板（可以推送 <编号>）",
+        "skip": "➖ 判成带货/广告，只记游标不推",
+    }.get(result, result)
+    lines = [
+        "【B站订阅·测试订阅】",
+        f"作者：{name or '未知UP'}（{uid}）",
+        f"类型：{parsed.get('action') or '动态'}",
+        f"标题：{parsed.get('title') or '（这条没有标题）'}",
+        f"正文：{_short_desc(parsed)}",
+        f"取数：{source}",
+    ]
+    if preset is not None:
+        lines.append(f"规则：《{preset.name}》［{preset.mode_text}］")
+    lines.append(f"判定：{verdict}")
+    lines.append(f"（推到本群 {gid}，不看有没有订阅）")
+    await reply(bot, ev, "\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -1618,63 +1879,11 @@ async def _check_one(uid: str, info: Dict) -> Optional[Dict]:
                     if kind == "video" and p.get("bvid"):
                         storage.remember_av(info, str(p["bvid"]))
                         update["pushed_av"] = list(info.get("pushed_av") or [])
-                    # 这类内容该推给哪些群（全局 + 每条订阅自己的开关）
+                    # 这类内容该推给哪些群（全局 + 每条订阅自己的开关）；
+                    # 之后整条交给 _deliver_dynamic：带货/广告过滤、游戏规则、
+                    # 待定队列、推送都在那一个函数里 —— bili测试订阅 走的是同一份逻辑。
                     targets = _targets_for(info, kind, notify)
-                    enabled = bool(targets)
-                    # 非官方号先过一遍带货/广告规则；判为广告就整条不推（游标照走）
-                    if enabled and ad_filter and preset is None:
-                        why = adfilter.looks_like_ad(p)
-                        if why:
-                            runtime.STATE["filtered"] = (
-                                int(runtime.STATE.get("filtered") or 0) + 1
-                            )
-                            logger.info(
-                                f"B站订阅：{name or uid} 的动态 {p.get('id_str')} "
-                                f"判定为带货/广告（{why}），这条不推"
-                            )
-                            enabled = False
-                    # enabled 为假表示这类动态整体关了（或判成广告），游标照走。
-                    # 注意 FILTER / PENDING 只会出现在"有游戏预设（官方号）且对应开关
-                    # （动态 / 视频）开着"的分支里，普通 UP 一律 PUSH，所以下面两个
-                    # 分支里 preset 一定不是 None。
-                    decision = _decide_how(preset, kind, p) if enabled else None
-                    if decision == games.FILTER:
-                        # FILTER 只有一个来源：命中了 block_keywords（两种口径都一样）
-                        runtime.STATE["filtered"] = int(runtime.STATE.get("filtered") or 0) + 1
-                        logger.info(
-                            f"B站订阅：{name or uid} 的动态 {p.get('id_str')} "
-                            f"命中《{preset.name}》的屏蔽关键词"
-                            f"（{preset.match_block(p, kind) or ''}），这条不推"
-                        )
-                    elif decision == games.PENDING:
-                        if cfg.get("queue_unmatched"):
-                            # 待定队列也要带全文，否则捞回来时还得再抓一次
-                            await fulltext.nodes_for(p)
-                            item = await pending.enqueue(uid, name, p, game=preset.name)
-                            await pending.notify_pending(item)
-                            logger.info(
-                                f"B站订阅：{name or uid} 的动态 {p.get('id_str')} 没命中"
-                                f"《{preset.name}》的放行词，进待定队列 #{item.get('seq')}"
-                            )
-                        else:
-                            runtime.STATE["filtered"] = (
-                                int(runtime.STATE.get("filtered") or 0) + 1
-                            )
-                            logger.info(
-                                f"B站订阅：{name or uid} 的动态 {p.get('id_str')} 没命中"
-                                f"《{preset.name}》的放行词，已过滤（不推群）"
-                            )
-                    elif decision == games.PUSH and targets:
-                        # 卡片（头部+标题+正文+首图）+ 其余图单独补发 + 长文合并转发
-                        msgs, forward = await build_dynamic_msgs(p, name)
-                        await push_to_groups(
-                            targets,
-                            msgs,
-                            forward,
-                            fallback_text=format_dynamic(p, name)["text"],
-                            kind=kind if kind in ("video", "live") else "dynamic",
-                        )
-                        logger.info(f"B站订阅：推送 {name or uid} 的动态 {p.get('id_str')}")
+                    await _deliver_dynamic(uid, name, p, preset, targets, ad_filter)
                     update["last_dynamic"] = str(p.get("id_str") or last)
 
     # ---------- 投稿列表（补动态接口的漏） ----------

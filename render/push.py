@@ -206,13 +206,18 @@ async def send_to_target(
         inst = gss.active_bot.get(bid)
         if inst is None:
             continue
+        # 传给核心的 bot_id 用**订阅时记下的那个真实 bot_id**：核心是按 bot_id 查这个
+        # bot 的配置（图片 / 合并转发等）的。有些核心（如 SayuCore）``active_bot`` 的
+        # key 是 WS_BOT_ID，直接拿 key 当 bot_id，核心就查不到配置、整条推送退回默认参数
+        # （日志里成片的 "配置项 xxx 不存在也没有配置"），合并转发可能因此被拆成单条。
+        bid_arg = want_bot or str(bid)
         try:
             await inst.target_send(
                 msgs,
                 kind,
                 str(target_id),
-                str(bid),
-                bot_self_id if bid == want_bot else "",
+                bid_arg,
+                bot_self_id if bid_arg == want_bot else "",
                 "",
             )
             return True
@@ -403,6 +408,17 @@ async def build_dynamic_msgs(parsed: Dict, name: str = "") -> Tuple[List[Message
     """
     up = str(parsed.get("uname") or name or "未知UP")
     images = [str(u) for u in (parsed.get("images") or []) if str(u or "").strip()]
+    # 图 ≤1 张就补一次：**空间动态接口**有时只给一张封面（全图在详情接口 / opus 页面里），
+    # 而"其余图走合并转发"要 ≥2 张 —— 不补的话同一条动态在订阅推送里只出单图，
+    # 而 bili推这条（它先 fill 过）却走了合并转发，看着就是两条链路不一致。
+    if len(images) <= 1 and str(parsed.get("kind") or "") in ("draw", "article"):
+        try:
+            # 必须 force=True：fetch 开头就 `if not force and not needs_full(): return`，
+            # 图文动态根本过不了那个门槛，等于没补（bili推这条 也是 force=True 才拿得到图）
+            await fulltext.fill(parsed)
+        except Exception as e:
+            logger.warning(f"B站订阅：动态 {parsed.get('id_str')} 补图失败（{e}）")
+        images = [str(u) for u in (parsed.get("images") or []) if str(u or "").strip()]
     with_image = bool(cfg.get("push_cover", True))
     want_extras = bool(cfg.get("push_extra_images", True))
     extras = images[1 : 1 + MAX_EXTRA_IMAGES] if want_extras else []
@@ -461,6 +477,13 @@ async def build_dynamic_msgs(parsed: Dict, name: str = "") -> Tuple[List[Message
     if rule_notes and not images_forward:
         # 没有转发可挂（其余图 0/1 张）：单独发一句说明
         msgs.append(MessageSegment.text(_rule_text(rule_notes)))
+    if images:
+        # 排查"多图动态推出来只有单图"用：配图总数 / 其余图走了转发还是单发
+        logger.info(
+            f"B站订阅：动态 {parsed.get('id_str')} 配图 {len(images)} 张"
+            f"（卡片首图 + 其余 {len(extras)} 张 → 转发 {len(images_forward)} 帧 / "
+            f"跟卡片单发 {len(inline_extras)} 张）"
+        )
     return msgs, images_forward + await fulltext.nodes_for(parsed)
 
 
@@ -663,7 +686,10 @@ async def push_to_groups(
             for extra in batches:
                 # 卡片发完再补全文（一次一帧，顺序由核心的发送队列保证）
                 await asyncio.sleep(_PUSH_GAP)
-                await send_group(gid, entry or {}, extra)
+                if not await send_group(gid, entry or {}, extra):
+                    logger.warning(
+                        f"B站订阅：给群 {gid} 补发（配图/全文合并转发，{len(extra)} 段）失败"
+                    )
             if batches and cfg.get("full_text_node", True):
                 logger.info(f"B站订阅：给群 {gid} 补发了全文（{len(forward or [])} 段）")
         await asyncio.sleep(_PUSH_GAP)
