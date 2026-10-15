@@ -26,7 +26,7 @@
     │  #异环# #异环曳尔沐#            │  标签 16→24 霞鹜文楷 #0057AE
     │  「你好呀~又见面了，我的朋友~？」 │  引语 18→27 #444
     │  正文……（行高 1.6）https://…   │  正文 16→24 #222，链接 #7B68EE
-    │  ┌──────────────────────────┐  │  配图铺满宽度、高 300→450（cover 裁切）
+    │  ┌──────────────────────────┐  │  普通图 450 高 cover 裁切；长图完整展示
     │  └──────────────────────────┘  │  圆角 4→6
     │  10-04 11:00      BiliSubscribe │  底部 14→21 #666
     └────────────────────────────────┘
@@ -55,6 +55,14 @@ CARD_RADIUS = 18  # 模板 12px（只有上面两个角圆）
 HEADER_PAD_X = 30
 IMG_H = 450  # 模板 .image-box 300px，cover 裁切
 IMG_RADIUS = 6  # 模板 4px
+# 长图（竖长配图，比如立绘/时装预览/长截图）按**完整展示**排：宽铺满、高按原比例，
+# 最多画 COVER_LONG_MAX_H，再长就整体缩小（宁可小也不裁掉）；卡片空间不够时还会
+# 再缩到剩下的空间里，免得把整张卡片顶过 MAX_FULL_H。
+# 原图高宽比 ≥ COVER_LONG_RATIO 才算长图，其余仍按 IMG_H = 450 的 cover 裁切，
+# 普通图（横图/接近方的图）观感保持不变。
+COVER_LONG_RATIO = 1.5  # 高 / 宽 ≥ 这个值就算长图
+COVER_LONG_MAX_H = 2400  # 长图最多画这么高
+COVER_LONG_MIN_H = 240  # 长图被卡片空间挤压时的最小高度（再小就没法看了）
 MAX_BODY_LINES = 18  # 正文最多画这么多行，超了截断（点链接看原文）
 MAX_FULL_H = 4096  # 整卡最高（有些客户端发不出去超长图）
 
@@ -398,6 +406,41 @@ def _cover_crop(img, w: int, h: int):
     return resized.crop((left, top, left + w, top + h))
 
 
+def _cover_long_layout(img, w: int, max_h: int):
+    """长图按**完整展示**排：宽铺满 ``w``、高按原比例，超过 ``max_h`` 就整体缩小。
+
+    和 ``_cover_crop`` 的区别是**不裁切** —— 竖长图（立绘、时装预览、长截图）要么
+    把卡片撑高，要么整张缩小，绝不会把上下两头切掉。缩过之后宽度会小于 ``w``，
+    调用方按 ``(w - 实际宽) // 2`` 居中放。
+    返回 ``(图, 宽, 高)``。
+    """
+    from PIL import Image
+
+    scale = w / max(1, img.width)
+    dw = max(1, int(img.width * scale + 0.5))
+    dh = max(1, int(img.height * scale + 0.5))
+    if dh > max_h:
+        k = max_h / dh
+        dw = max(1, int(dw * k))
+        dh = max(1, int(max_h))
+    dw = min(dw, w)
+    return img.resize((dw, dh), Image.LANCZOS), dw, dh
+
+
+def _cover_layout(img, w: int, budget: int):
+    """首图怎么排：普通图沿用 ``_cover_crop``（450 高 cover 裁切），长图完整展示。
+
+    ``budget`` 是卡片留给首图的空间（正文画完到卡片上限之间的高度）：长图的最高
+    高度取 ``COVER_LONG_MAX_H`` 与 ``budget`` 里小的那个（不小于 ``COVER_LONG_MIN_H``），
+    这样长图不会把整张卡片顶过 ``MAX_FULL_H`` 被腰斩。
+    返回 ``(图, 宽, 高)``。
+    """
+    if img.height / max(1, img.width) >= COVER_LONG_RATIO:
+        max_h = max(COVER_LONG_MIN_H, min(COVER_LONG_MAX_H, int(budget)))
+        return _cover_long_layout(img, w, max_h)
+    return _cover_crop(img, w, IMG_H), w, IMG_H
+
+
 # ---------------------------------------------------------------- 头部素材
 def _header_bg(width: int, height: int):
     """头部底色：淡粉，横向从略深渐变到近白（新模板那种很浅的粉）。"""
@@ -495,7 +538,7 @@ MAX_CARD_BYTES = 300 * 1024  # 推送图体积上限（移动端/流量友好）
 def _encode_card(card, has_photo: bool) -> bytes:
     """编码卡片：带图走 JPEG（照片压得小），纯文字走 PNG（小字更锐利）。
 
-    封面已经按固定尺寸裁过，正常 100~200KB；万一超了 ``MAX_CARD_BYTES``
+    封面已经缩进卡片（普通图 450 高裁切、长图完整展示），正常 100~200KB；万一超了 ``MAX_CARD_BYTES``
     （封面是细节极多的照片那类）就降质量重编，别把推送图顶得太肥 ——
     注意别去压字体：字体是本机渲染用的，**不会**跟着图片发出去。
     """
@@ -597,8 +640,16 @@ def render(
         y += desc_h + 16
 
     cover_img = _load_cover(cover)
+    cover_shot = None
+    cover_w = 0
+    cover_h = 0
     if cover_img is not None:
-        y += IMG_H + 16
+        # 先把底部一行的高度扣掉，剩下的才是首图能用的空间（长图按这个上限缩，
+        # 免得整张卡片顶过 MAX_FULL_H 被切掉）
+        cover_shot, cover_w, cover_h = _cover_layout(
+            cover_img, inner_w, MAX_FULL_H - y - 16 - (LH_FOOT + 8)
+        )
+        y += cover_h + 16
     y += LH_FOOT + 8  # 底部一行
 
     total_h = min(max(y, 200), MAX_FULL_H)
@@ -746,14 +797,14 @@ def render(
     if desc_runs:
         y += 16
 
-    if cover_img is not None:
-        shot = _cover_crop(cover_img, inner_w, IMG_H)
-        mask = Image.new("L", (inner_w, IMG_H), 0)
+    if cover_shot is not None:
+        mask = Image.new("L", (cover_w, cover_h), 0)
         ImageDraw.Draw(mask).rounded_rectangle(
-            (0, 0, inner_w - 1, IMG_H - 1), radius=IMG_RADIUS, fill=255
+            (0, 0, cover_w - 1, cover_h - 1), radius=IMG_RADIUS, fill=255
         )
-        card.paste(shot, (PAD, y), mask)
-        y += IMG_H + 16
+        # 长图缩过之后宽度不一定铺满：居中放
+        card.paste(cover_shot, (PAD + (inner_w - cover_w) // 2, y), mask)
+        y += cover_h + 16
 
     # 底部：左时间、右署名（模板 .footer 是 content 里面一行，不加底色）
     _text((PAD, y), time_text or "", f_foot, SUB_C)
